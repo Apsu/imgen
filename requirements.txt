@@ -1,0 +1,10 @@
+accelerate
+aiohttp
+diffusers
+fastapi
+protobuf
+pydantic
+sentencepiece
+torch
+transformers
+uvicorn
