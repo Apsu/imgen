@@ -14,6 +14,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from torch import Generator
 from diffusers import AutoPipelineForText2Image
 
 # Set up logging
@@ -22,8 +23,8 @@ logging.basicConfig(level=logging.INFO)
 
 # Global configuration and state variables
 device = torch.device("cuda")
-server_config: Optional[argparse.Namespace] = None
-shared_generator = None
+server_config: Optional[argparse.Namespace]
+
 
 # Request model definition
 class TextToImageInput(BaseModel):
@@ -32,12 +33,14 @@ class TextToImageInput(BaseModel):
     height: int = 384
     steps: int = 4
     guidance: float = 0.0
+    seed: int | None = None
+
 
 class DiffusionGenerator:
     """Diffusion generator abstraction using AutoPipelineForText2Image."""
 
     def __init__(self, model: str):
-        # Set float32 matmul precision to high for better performance on CUDA
+        # Set float32 matmul precision to high for better performance on Hopper+
         torch.set_float32_matmul_precision("high")
         logger.info(f"Loading model {model}...")
 
@@ -49,6 +52,7 @@ class DiffusionGenerator:
 
         # Hide progress bar after generation for cleaner logs
         self.pipeline.set_progress_bar_config(leave=False)
+        self.generator = Generator(device)
         logger.info("Pipeline loaded successfully")
 
     def warmup(self, gen_args: Dict[str, Any], warmup_iterations: int = 1) -> None:
@@ -62,16 +66,20 @@ class DiffusionGenerator:
         elapsed = time.time() - start_time
         logger.info(f"Warmup complete in {elapsed:.2f} seconds")
 
-    def generate(self, gen_args: Dict[str, Any]) -> Tuple[str, float]:
+    def generate(self, gen_args: Dict[str, Any], seed: int | None) -> Tuple[str, float]:
         """Generate an image from the given arguments.
 
         Returns:
             Tuple containing base64 encoded image and generation time
         """
+
+        if seed is not None:
+            self.generator = self.generator.manual_seed(seed)
+
         start_time = time.time()
 
         # Perform the actual image generation
-        output = self.pipeline(**gen_args, output_type="pil")
+        output = self.pipeline(**gen_args, generator=self.generator, output_type="pil")
         elapsed = time.time() - start_time
 
         # Convert the generated image to a base64-encoded PNG
@@ -80,6 +88,9 @@ class DiffusionGenerator:
         img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
         return img_str, elapsed
+
+
+shared_generator: DiffusionGenerator
 
 
 def parse_args() -> argparse.Namespace:
@@ -149,21 +160,20 @@ async def generate_image(request: Request, image_input: TextToImageInput):
             "guidance_scale": image_input.guidance,
         }
 
-        logger.info(f"Generating image with prompt: '{image_input.prompt[:50]}...' "
-                    f"at {image_input.width}x{image_input.height} ({image_input.steps} @ {image_input.guidance})")
+        logger.info(
+            f"Generating image with prompt: '{image_input.prompt[:50]}...' "
+            f"at {image_input.width}x{image_input.height} ({image_input.steps} @ {image_input.guidance} / {image_input.seed})"
+        )
 
         # Run generation in a thread pool to not block the event loop
         loop = asyncio.get_event_loop()
         img_str, gen_time = await loop.run_in_executor(
-            None, lambda: shared_generator.generate(gen_args)
+            None, lambda: shared_generator.generate(gen_args, image_input.seed)
         )
 
         logger.info(f"Image generated in {gen_time:.2f}s")
 
-        return JSONResponse({
-            "image": img_str,
-            "gen_time": gen_time
-        })
+        return JSONResponse({"image": img_str, "gen_time": gen_time})
     except Exception as e:
         logger.error(f"Error generating image: {str(e)}")
         logger.error(traceback.format_exc())
@@ -176,8 +186,5 @@ if __name__ == "__main__":
 
     # Run the server
     uvicorn.run(
-        app,
-        host=server_config.host,
-        port=server_config.port,
-        log_level=logging.WARNING
+        app, host=server_config.host, port=server_config.port, log_level=logging.WARNING
     )
