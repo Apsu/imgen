@@ -153,6 +153,32 @@ AVAILABLE_MODELS = {
         vram_gb=10.0,
         description="Photorealistic imagery"
     ),
+    "dreamshaper": ModelConfig(
+        name="DreamShaper XL v2 Turbo",
+        model_id="Lykon/dreamshaper-xl-v2-turbo",
+        pipeline_class=StableDiffusionXLPipeline,
+        default_steps=6,
+        default_guidance=2.0,
+        min_width=512,
+        max_width=2048,
+        min_height=512,
+        max_height=2048,
+        vram_gb=10.0,
+        description="Artistic and fantasy-focused (turbo)"
+    ),
+    "anime": ModelConfig(
+        name="Animagine XL 4.0",
+        model_id="cagliostrolab/animagine-xl-4.0",
+        pipeline_class=StableDiffusionXLPipeline,
+        default_steps=25,
+        default_guidance=7.0,
+        min_width=512,
+        max_width=2048,
+        min_height=512,
+        max_height=2048,
+        vram_gb=10.0,
+        description="High-quality anime-style generation v4"
+    ),
 }
 
 # Global configuration and state variables
@@ -244,12 +270,25 @@ def worker_process(worker_id: int, model_key: str, gpu_id: int, pipe: mp.Pipe, r
                 ).to(device)
         else:
             # For specific pipeline classes
-            pipeline = model_config.pipeline_class.from_pretrained(
-                model_config.model_id,
-                torch_dtype=torch.bfloat16,
-                use_safetensors=True,
-                variant="fp16" if "xl" in model_config.model_id.lower() else None,
-            ).to(device)
+            # Some models don't have fp16 variant
+            try:
+                pipeline = model_config.pipeline_class.from_pretrained(
+                    model_config.model_id,
+                    torch_dtype=torch.bfloat16,
+                    use_safetensors=True,
+                    variant="fp16" if "xl" in model_config.model_id.lower() else None,
+                ).to(device)
+            except ValueError as e:
+                if "variant=fp16" in str(e):
+                    # Try without variant
+                    logger.info(f"Model {model_config.name} doesn't have fp16 variant, loading without variant")
+                    pipeline = model_config.pipeline_class.from_pretrained(
+                        model_config.model_id,
+                        torch_dtype=torch.bfloat16,
+                        use_safetensors=True,
+                    ).to(device)
+                else:
+                    raise
 
         # Optimize model components if available
         if hasattr(pipeline, 'transformer'):
