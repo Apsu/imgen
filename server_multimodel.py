@@ -131,14 +131,14 @@ AVAILABLE_MODELS = {
         name="SDXL Turbo",
         model_id="stabilityai/sdxl-turbo",
         pipeline_class=AutoPipelineForText2Image,
-        default_steps=1,
+        default_steps=2,  # 1-4 steps work, 2 is more stable
         default_guidance=0.0,
         min_width=512,
         max_width=512,
         min_height=512,
         max_height=512,
         vram_gb=8.0,
-        description="Ultra-fast SDXL generation (1 step)"
+        description="Ultra-fast SDXL generation (1-4 steps)"
     ),
     "realvisxl": ModelConfig(
         name="RealVisXL V4",
@@ -324,7 +324,19 @@ def worker_process(worker_id: int, model_key: str, gpu_id: int, pipe: mp.Pipe, r
                 
                 # Convert to base64
                 buffered = io.BytesIO()
-                output.images[0].save(buffered, format="PNG")
+                image = output.images[0]
+                
+                # Fix for SDXL Turbo potential blank images
+                if model_key == "turbo":
+                    import numpy as np
+                    from PIL import Image
+                    # Convert to numpy array and ensure proper range
+                    img_array = np.array(image)
+                    if img_array.max() <= 1.0:
+                        img_array = (img_array * 255).clip(0, 255).astype(np.uint8)
+                    image = Image.fromarray(img_array)
+                
+                image.save(buffered, format="PNG")
                 img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
                 
                 logger.info(f"Worker {worker_id} completed in {elapsed:.2f}s")
