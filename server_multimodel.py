@@ -141,17 +141,43 @@ AVAILABLE_MODELS = {
         description="Artistic and fantasy-focused"
     ),
     "anime": ModelConfig(
-        name="Anything XL",
-        model_id="Linaqruf/anything-v3-1",
-        pipeline_class=AutoPipelineForText2Image,
+        name="Animagine XL",
+        model_id="Linaqruf/animagine-xl-3.1",
+        pipeline_class=StableDiffusionXLPipeline,
         default_steps=25,
         default_guidance=7.0,
         min_width=512,
-        max_width=1024,
+        max_width=2048,
         min_height=512,
-        max_height=1024,
-        vram_gb=8.0,
-        description="Anime-style generation"
+        max_height=2048,
+        vram_gb=10.0,
+        description="High-quality anime-style generation"
+    ),
+    "lightning": ModelConfig(
+        name="SDXL Lightning",
+        model_id="ByteDance/SDXL-Lightning",
+        pipeline_class=StableDiffusionXLPipeline,
+        default_steps=4,
+        default_guidance=0.0,
+        min_width=512,
+        max_width=2048,
+        min_height=512,
+        max_height=2048,
+        vram_gb=10.0,
+        description="Ultra-fast SDXL generation (4 steps)"
+    ),
+    "juggernaut": ModelConfig(
+        name="Juggernaut XL",
+        model_id="RunDiffusion/Juggernaut-XL-v9",
+        pipeline_class=StableDiffusionXLPipeline,
+        default_steps=30,
+        default_guidance=6.0,
+        min_width=512,
+        max_width=2048,
+        min_height=512,
+        max_height=2048,
+        vram_gb=10.0,
+        description="Photorealistic and detailed imagery"
     ),
 }
 
