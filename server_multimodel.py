@@ -127,22 +127,22 @@ AVAILABLE_MODELS = {
         vram_gb=12.0,
         description="Aesthetic-focused model"
     ),
-    "dreamshaper": ModelConfig(
-        name="DreamShaper XL",
-        model_id="Lykon/dreamshaper-xl-1-0",
-        pipeline_class=StableDiffusionXLPipeline,
-        default_steps=30,
-        default_guidance=7.5,
+    "turbo": ModelConfig(
+        name="SDXL Turbo",
+        model_id="stabilityai/sdxl-turbo",
+        pipeline_class=AutoPipelineForText2Image,
+        default_steps=1,
+        default_guidance=0.0,
         min_width=512,
-        max_width=2048,
+        max_width=512,
         min_height=512,
-        max_height=2048,
-        vram_gb=10.0,
-        description="Artistic and fantasy-focused"
+        max_height=512,
+        vram_gb=8.0,
+        description="Ultra-fast SDXL generation (1 step)"
     ),
-    "anime": ModelConfig(
-        name="Animagine XL",
-        model_id="Linaqruf/animagine-xl-3.1",
+    "realvisxl": ModelConfig(
+        name="RealVisXL V4",
+        model_id="SG161222/RealVisXL_V4.0",
         pipeline_class=StableDiffusionXLPipeline,
         default_steps=25,
         default_guidance=7.0,
@@ -151,33 +151,7 @@ AVAILABLE_MODELS = {
         min_height=512,
         max_height=2048,
         vram_gb=10.0,
-        description="High-quality anime-style generation"
-    ),
-    "lightning": ModelConfig(
-        name="SDXL Lightning",
-        model_id="ByteDance/SDXL-Lightning",
-        pipeline_class=StableDiffusionXLPipeline,
-        default_steps=4,
-        default_guidance=0.0,
-        min_width=512,
-        max_width=2048,
-        min_height=512,
-        max_height=2048,
-        vram_gb=10.0,
-        description="Ultra-fast SDXL generation (4 steps)"
-    ),
-    "juggernaut": ModelConfig(
-        name="Juggernaut XL",
-        model_id="RunDiffusion/Juggernaut-XL-v9",
-        pipeline_class=StableDiffusionXLPipeline,
-        default_steps=30,
-        default_guidance=6.0,
-        min_width=512,
-        max_width=2048,
-        min_height=512,
-        max_height=2048,
-        vram_gb=10.0,
-        description="Photorealistic and detailed imagery"
+        description="Photorealistic imagery"
     ),
 }
 
@@ -254,11 +228,20 @@ def worker_process(worker_id: int, model_key: str, gpu_id: int, pipe: mp.Pipe, r
 
         # Load the appropriate model
         if model_config.pipeline_class == AutoPipelineForText2Image:
-            pipeline = AutoPipelineForText2Image.from_pretrained(
-                model_config.model_id,
-                torch_dtype=torch.bfloat16,
-                use_safetensors=True,
-            ).to(device)
+            # Special handling for SDXL Turbo
+            if model_key == "turbo":
+                pipeline = AutoPipelineForText2Image.from_pretrained(
+                    model_config.model_id,
+                    torch_dtype=torch.float16,
+                    variant="fp16",
+                    use_safetensors=True,
+                ).to(device)
+            else:
+                pipeline = AutoPipelineForText2Image.from_pretrained(
+                    model_config.model_id,
+                    torch_dtype=torch.bfloat16,
+                    use_safetensors=True,
+                ).to(device)
         else:
             # For specific pipeline classes
             pipeline = model_config.pipeline_class.from_pretrained(
@@ -332,7 +315,9 @@ def worker_process(worker_id: int, model_key: str, gpu_id: int, pipe: mp.Pipe, r
                 start_time = time.time()
                 
                 # Generate image
-                with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                # Use float16 for turbo, bfloat16 for others
+                dtype = torch.float16 if model_key == "turbo" else torch.bfloat16
+                with torch.amp.autocast('cuda', dtype=dtype):
                     output = pipeline(**gen_args, generator=generator, output_type="pil")
                 
                 elapsed = time.time() - start_time
