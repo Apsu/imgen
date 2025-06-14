@@ -1,0 +1,224 @@
+/* Custom styles for Image Generation Studio */
+
+:root {
+    --bs-dark-bg-subtle: #1a1d21;
+    --bs-border-color: #363b42;
+}
+
+body {
+    min-height: 100vh;
+    background-color: var(--bs-dark-bg-subtle);
+}
+
+/* Navbar styling */
+.navbar {
+    box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+}
+
+/* Card enhancements */
+.card {
+    border-color: var(--bs-border-color);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+
+/* Form enhancements */
+.form-control:focus,
+.form-select:focus {
+    border-color: #0d6efd;
+    box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25);
+}
+
+/* History grid */
+.history-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+    gap: 8px;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.history-item {
+    position: relative;
+    aspect-ratio: 1;
+    cursor: pointer;
+    border-radius: 4px;
+    overflow: hidden;
+    transition: transform 0.2s;
+}
+
+.history-item:hover {
+    transform: scale(1.05);
+    z-index: 10;
+}
+
+.history-item img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.history-item .history-info {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: linear-gradient(to top, rgba(0,0,0,0.8), transparent);
+    color: white;
+    font-size: 0.7rem;
+    padding: 2px 4px;
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+
+.history-item:hover .history-info {
+    opacity: 1;
+}
+
+/* Result image styling */
+.result-image {
+    max-width: 100%;
+    height: auto;
+    border-radius: 8px;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+    cursor: zoom-in;
+    transition: transform 0.2s;
+}
+
+.result-image:hover {
+    transform: scale(1.02);
+}
+
+/* Progress animation */
+@keyframes pulse {
+    0% { opacity: 1; }
+    50% { opacity: 0.7; }
+    100% { opacity: 1; }
+}
+
+#progressContainer .card {
+    animation: pulse 2s infinite;
+}
+
+/* Connection status */
+#connectionStatus.bg-success {
+    animation: none;
+}
+
+#connectionStatus.bg-secondary {
+    animation: pulse 3s infinite;
+}
+
+/* Dimension presets */
+.btn-group.flex-wrap {
+    display: flex;
+    flex-wrap: wrap;
+}
+
+.btn-group.flex-wrap .btn {
+    margin-bottom: 0.25rem;
+}
+
+/* Range inputs */
+.form-range {
+    height: 8px;
+}
+
+.form-range::-webkit-slider-thumb {
+    width: 20px;
+    height: 20px;
+}
+
+.form-range::-moz-range-thumb {
+    width: 20px;
+    height: 20px;
+}
+
+/* Stats table */
+.stats-table td:first-child {
+    font-weight: 500;
+    color: var(--bs-secondary);
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--bs-dark-bg-subtle);
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--bs-gray-700);
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--bs-gray-600);
+}
+
+/* Mobile responsiveness */
+@media (max-width: 768px) {
+    .history-grid {
+        grid-template-columns: repeat(auto-fill, minmax(60px, 1fr));
+    }
+    
+    .btn-group.flex-wrap .btn {
+        font-size: 0.875rem;
+        padding: 0.25rem 0.5rem;
+    }
+}
+
+/* Loading animation for buttons */
+.btn.loading {
+    position: relative;
+    color: transparent;
+}
+
+.btn.loading::after {
+    content: "";
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    top: 50%;
+    left: 50%;
+    margin-left: -8px;
+    margin-top: -8px;
+    border: 2px solid #ffffff;
+    border-radius: 50%;
+    border-top-color: transparent;
+    animation: spinner 0.8s linear infinite;
+}
+
+@keyframes spinner {
+    to { transform: rotate(360deg); }
+}
+
+/* Image comparison slider (future feature) */
+.image-compare {
+    position: relative;
+    overflow: hidden;
+    border-radius: 8px;
+}
+
+.image-compare img {
+    display: block;
+    width: 100%;
+}
+
+/* Tooltip enhancements */
+.tooltip-inner {
+    max-width: 300px;
+    text-align: left;
+}
+
+/* Error message styling */
+.alert-danger {
+    border-left: 4px solid var(--bs-danger);
+}
+
+/* Success message styling */
+.alert-success {
+    border-left: 4px solid var(--bs-success);
+}

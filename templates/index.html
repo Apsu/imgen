@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Image Generation Studio</title>
+    
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- Bootstrap Icons -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <nav class="navbar navbar-dark bg-dark border-bottom">
+        <div class="container-fluid">
+            <span class="navbar-brand mb-0 h1">
+                <i class="bi bi-palette"></i> Image Generation Studio
+            </span>
+            <div class="d-flex align-items-center">
+                <span id="connectionStatus" class="badge bg-secondary me-3">
+                    <i class="bi bi-wifi-off"></i> Disconnected
+                </span>
+                <button class="btn btn-outline-light btn-sm" onclick="showStats()">
+                    <i class="bi bi-graph-up"></i> Stats
+                </button>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container-fluid py-4">
+        <div class="row">
+            <!-- Settings Column -->
+            <div class="col-lg-4 col-xl-3">
+                <div class="card mb-3">
+                    <div class="card-header">
+                        <h5 class="mb-0">Generation Settings</h5>
+                    </div>
+                    <div class="card-body">
+                        <form id="generationForm">
+                            <!-- Prompt -->
+                            <div class="mb-3">
+                                <label for="prompt" class="form-label">Prompt</label>
+                                <textarea class="form-control" id="prompt" name="prompt" rows="3" 
+                                    placeholder="Describe what you want to generate..." required>A beautiful sunset over mountains, dramatic lighting, photorealistic</textarea>
+                                <div class="d-flex gap-2 mt-2">
+                                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="clearPrompt()">
+                                        <i class="bi bi-x-circle"></i> Clear
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="randomPrompt()">
+                                        <i class="bi bi-shuffle"></i> Random
+                                    </button>
+                                </div>
+                            </div>
+
+                            <!-- Dimension Presets -->
+                            <div class="mb-3">
+                                <label class="form-label">Quick Presets</label>
+                                <div class="btn-group d-flex flex-wrap gap-2" role="group">
+                                    <button type="button" class="btn btn-sm btn-outline-primary" onclick="setDimensions(512, 512)">
+                                        <i class="bi bi-square"></i> 512²
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-outline-primary" onclick="setDimensions(768, 768)">
+                                        <i class="bi bi-square"></i> 768²
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-outline-primary" onclick="setDimensions(1024, 768)">
+                                        <i class="bi bi-image"></i> Landscape
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-outline-primary" onclick="setDimensions(768, 1024)">
+                                        <i class="bi bi-phone"></i> Portrait
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-outline-primary" onclick="setDimensions(1920, 1080)">
+                                        <i class="bi bi-tv"></i> HD
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-outline-primary" onclick="setDimensions(1024, 1024)">
+                                        <i class="bi bi-square-fill"></i> 1K²
+                                    </button>
+                                </div>
+                            </div>
+
+                            <!-- Dimensions -->
+                            <div class="row g-2 mb-3">
+                                <div class="col-6">
+                                    <label for="width" class="form-label">Width</label>
+                                    <input type="number" class="form-control" id="width" name="width" 
+                                        value="1024" min="256" max="2048" step="8" required>
+                                </div>
+                                <div class="col-6">
+                                    <label for="height" class="form-label">Height</label>
+                                    <input type="number" class="form-control" id="height" name="height" 
+                                        value="768" min="256" max="2048" step="8" required>
+                                </div>
+                                <div class="col-12">
+                                    <small class="text-muted">
+                                        <span id="pixelCount">786,432</span> pixels
+                                        <span id="aspectRatio" class="ms-2">(4:3)</span>
+                                    </small>
+                                </div>
+                            </div>
+
+                            <!-- Steps -->
+                            <div class="mb-3">
+                                <label for="steps" class="form-label">
+                                    Steps: <span id="stepsValue">4</span>
+                                </label>
+                                <input type="range" class="form-range" id="steps" name="steps" 
+                                    value="4" min="1" max="50" step="1">
+                                <div class="d-flex justify-content-between">
+                                    <small class="text-muted">Fast</small>
+                                    <small class="text-muted">Quality</small>
+                                </div>
+                            </div>
+
+                            <!-- Guidance -->
+                            <div class="mb-3">
+                                <label for="guidance" class="form-label">
+                                    Guidance Scale: <span id="guidanceValue">0.0</span>
+                                </label>
+                                <input type="range" class="form-range" id="guidance" name="guidance" 
+                                    value="0" min="0" max="20" step="0.5">
+                                <div class="d-flex justify-content-between">
+                                    <small class="text-muted">Creative</small>
+                                    <small class="text-muted">Precise</small>
+                                </div>
+                            </div>
+
+                            <!-- Seed -->
+                            <div class="mb-3">
+                                <label for="seed" class="form-label">Seed (Optional)</label>
+                                <div class="input-group">
+                                    <input type="number" class="form-control" id="seed" name="seed" 
+                                        placeholder="Random" min="-2147483648" max="2147483647">
+                                    <button class="btn btn-outline-secondary" type="button" onclick="randomSeed()">
+                                        <i class="bi bi-dice-3"></i>
+                                    </button>
+                                </div>
+                                <small class="text-muted">Leave empty for random results</small>
+                            </div>
+
+                            <!-- Generate Button -->
+                            <div class="d-grid gap-2">
+                                <button type="submit" class="btn btn-primary btn-lg" id="generateBtn">
+                                    <i class="bi bi-stars"></i> Generate Image
+                                </button>
+                                <div id="estimatedTime" class="text-center text-muted small"></div>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- History -->
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h6 class="mb-0">Recent Generations</h6>
+                        <button class="btn btn-sm btn-outline-danger" onclick="clearHistory()">
+                            <i class="bi bi-trash"></i>
+                        </button>
+                    </div>
+                    <div class="card-body p-2">
+                        <div id="historyContainer" class="history-grid">
+                            <!-- History items will be added here -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Results Column -->
+            <div class="col-lg-8 col-xl-9">
+                <div id="resultContainer">
+                    <!-- Welcome message -->
+                    <div class="text-center text-muted py-5">
+                        <i class="bi bi-image" style="font-size: 4rem;"></i>
+                        <h4 class="mt-3">Ready to Generate</h4>
+                        <p>Configure your settings and click Generate to create an image</p>
+                    </div>
+                </div>
+
+                <!-- Generation Progress -->
+                <div id="progressContainer" class="d-none">
+                    <div class="card">
+                        <div class="card-body text-center py-5">
+                            <div class="spinner-border text-primary mb-3" role="status">
+                                <span class="visually-hidden">Generating...</span>
+                            </div>
+                            <h5>Generating Image...</h5>
+                            <p class="text-muted mb-0">Processing your request</p>
+                            <p class="text-muted small" id="progressTime">0.0s</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Stats Modal -->
+    <div class="modal fade" id="statsModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Server Statistics</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body" id="statsContent">
+                    <div class="text-center">
+                        <div class="spinner-border" role="status">
+                            <span class="visually-hidden">Loading...</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Image Modal -->
+    <div class="modal fade" id="imageModal" tabindex="-1">
+        <div class="modal-dialog modal-xl modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Generated Image</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body text-center">
+                    <img id="modalImage" src="" alt="Generated Image" class="img-fluid">
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                    <button type="button" class="btn btn-primary" onclick="downloadImage()">
+                        <i class="bi bi-download"></i> Download
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <!-- Custom JS -->
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

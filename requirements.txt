@@ -2,9 +2,12 @@ accelerate
 aiohttp
 diffusers
 fastapi
+jinja2
 protobuf
 pydantic
+python-multipart
 sentencepiece
 torch
 transformers
 uvicorn
+websockets
