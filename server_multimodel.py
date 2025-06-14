@@ -160,8 +160,7 @@ server_config: Optional[argparse.Namespace]
 
 # Global pipeline storage for worker processes
 # Each worker will have a model assigned to it
-worker_pipelines = {}  # worker_id -> (pipeline, generator, device, rank, model_key)
-worker_models = {}     # worker_id -> model_key
+worker_pipeline = None  # Will be set in each worker process
 
 # Model assignment tracking
 model_assignments = {}  # model_key -> [worker_ids]
@@ -202,9 +201,9 @@ class TextToImageInput(BaseModel):
         return v
 
 
-def init_worker(worker_id: int, model_key: str, gpu_id: int, ready_queue: mp.Queue, error_queue: mp.Queue):
-    """Initialize a worker process with its GPU and assigned model."""
-    global worker_pipelines
+def worker_process(worker_id: int, model_key: str, gpu_id: int, pipe: mp.Pipe, ready_queue: mp.Queue, error_queue: mp.Queue):
+    """Worker process that handles image generation requests."""
+    global worker_pipeline
     
     # Ignore SIGINT in worker processes
     signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -272,11 +271,60 @@ def init_worker(worker_id: int, model_key: str, gpu_id: int, ready_queue: mp.Que
         _ = pipeline(**warmup_args, output_type="pil")
         logger.info(f"Worker {worker_id} warmup complete")
         
-        # Store pipeline info
-        worker_pipelines[worker_id] = (pipeline, generator, device, gpu_id, model_key)
+        # Store pipeline info in global
+        worker_pipeline = (pipeline, generator, device, gpu_id, model_key)
         
         # Signal ready
         ready_queue.put((worker_id, model_key, gpu_id))
+        
+        # Main worker loop
+        while True:
+            try:
+                # Wait for request from pipe
+                request = pipe.recv()
+                
+                if request is None:  # Shutdown signal
+                    break
+                
+                gen_args, seed, request_id = request
+                
+                # Generate image
+                logger.info(
+                    f"Worker {worker_id} (GPU {gpu_id}, {model_key}) processing: "
+                    f"prompt='{gen_args['prompt'][:50]}...' "
+                    f"size={gen_args['width']}x{gen_args['height']} "
+                    f"steps={gen_args['num_inference_steps']} guidance={gen_args['guidance_scale']} seed={seed}"
+                )
+                
+                if seed is not None:
+                    generator.manual_seed(seed)
+                else:
+                    random_seed = random.randint(0, 2**32 - 1)
+                    generator.manual_seed(random_seed)
+                    seed = random_seed
+                
+                start_time = time.time()
+                
+                # Generate image
+                with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                    output = pipeline(**gen_args, generator=generator, output_type="pil")
+                
+                elapsed = time.time() - start_time
+                
+                # Convert to base64
+                buffered = io.BytesIO()
+                output.images[0].save(buffered, format="PNG")
+                img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+                
+                logger.info(f"Worker {worker_id} completed in {elapsed:.2f}s")
+                
+                # Send result back
+                pipe.send((img_str, elapsed, seed))
+                
+            except Exception as e:
+                logger.error(f"Worker {worker_id} error: {e}")
+                logger.error(traceback.format_exc())
+                pipe.send((None, 0, None))
         
     except Exception as e:
         logger.error(f"Worker {worker_id} failed to initialize: {str(e)}")
@@ -285,46 +333,6 @@ def init_worker(worker_id: int, model_key: str, gpu_id: int, ready_queue: mp.Que
         raise
 
 
-def worker_generate_image(args):
-    """Generate an image using the initialized pipeline."""
-    if shutdown_event.is_set():
-        return None, 0, None
-        
-    gen_args, seed, request_id, worker_id = args
-    
-    # Get worker's pipeline
-    pipeline, generator, device, gpu_id, model_key = worker_pipelines[worker_id]
-    
-    logger.info(
-        f"Worker {worker_id} (GPU {gpu_id}, {model_key}) processing: "
-        f"prompt='{gen_args['prompt'][:50]}...' "
-        f"size={gen_args['width']}x{gen_args['height']} "
-        f"steps={gen_args['num_inference_steps']} guidance={gen_args['guidance_scale']} seed={seed}"
-    )
-    
-    if seed is not None:
-        generator = generator.manual_seed(seed)
-    else:
-        random_seed = random.randint(0, 2**32 - 1)
-        generator = generator.manual_seed(random_seed)
-        seed = random_seed
-    
-    start_time = time.time()
-    
-    # Generate image
-    with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-        output = pipeline(**gen_args, generator=generator, output_type="pil")
-    
-    elapsed = time.time() - start_time
-    
-    # Convert to base64
-    buffered = io.BytesIO()
-    output.images[0].save(buffered, format="PNG")
-    img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
-    
-    logger.info(f"Worker {worker_id} completed in {elapsed:.2f}s")
-    
-    return img_str, elapsed, seed
 
 
 class MultiModelGenerator:
@@ -334,11 +342,15 @@ class MultiModelGenerator:
         self.model_distribution = model_distribution
         self.num_gpus = num_gpus
         self.shutdown_requested = False
-        self.worker_pool = None
+        self.worker_processes = []
+        self.executor = None
         
         # Track which workers have which models
         self.model_to_workers = {model: [] for model in model_distribution}
         self.worker_to_model = {}
+        
+        # Worker pipes for communication
+        self.worker_pipes = {}  # worker_id -> (parent_conn, child_conn)
         
         # Queues for worker coordination
         self.ready_queue = mp.Queue()
@@ -350,6 +362,9 @@ class MultiModelGenerator:
         
         # Start workers
         self._start_workers()
+        
+        # Create thread pool executor for running tasks
+        self.executor = ThreadPoolExecutor(max_workers=sum(model_distribution.values()))
         
         # Start task processors
         self.task_processors = []
@@ -372,7 +387,11 @@ class MultiModelGenerator:
                 if gpu_id >= self.num_gpus:
                     raise ValueError(f"Not enough GPUs for requested model distribution")
                 
-                worker_args.append((worker_id, model_key, gpu_id, self.ready_queue, self.error_queue))
+                # Create pipe for this worker
+                parent_conn, child_conn = mp.Pipe()
+                self.worker_pipes[worker_id] = (parent_conn, child_conn)
+                
+                worker_args.append((worker_id, model_key, gpu_id, child_conn, self.ready_queue, self.error_queue))
                 self.worker_to_model[worker_id] = model_key
                 worker_id += 1
                 gpu_id += 1
@@ -380,7 +399,7 @@ class MultiModelGenerator:
         # Create process pool
         processes = []
         for args in worker_args:
-            p = mp.Process(target=init_worker, args=args)
+            p = mp.Process(target=worker_process, args=args)
             p.start()
             processes.append(p)
         
@@ -414,7 +433,8 @@ class MultiModelGenerator:
             if errors:
                 raise RuntimeError(f"Worker initialization failed:\n" + "\n".join(errors))
         
-        self.worker_pool = mp.Pool(processes=len(worker_args))
+        # Don't create a pool - we'll use the existing processes
+        self.worker_processes = processes
         logger.info("All workers initialized and ready")
         
         # Update global model status
@@ -447,14 +467,19 @@ class MultiModelGenerator:
                 # Round-robin worker selection
                 worker_id = workers[hash(request_id) % len(workers)]
                 
-                # Submit to worker
+                # Submit to worker via pipe
                 try:
+                    parent_conn, _ = self.worker_pipes[worker_id]
+                    
+                    # Send request to worker
+                    parent_conn.send((gen_args, seed, request_id))
+                    
+                    # Wait for response asynchronously
                     result = await asyncio.get_event_loop().run_in_executor(
-                        None,
-                        self.worker_pool.apply,
-                        worker_generate_image,
-                        ((gen_args, seed, request_id, worker_id),)
+                        self.executor,
+                        parent_conn.recv
                     )
+                    
                     future.set_result(result)
                 except Exception as e:
                     future.set_exception(e)
@@ -514,9 +539,27 @@ class MultiModelGenerator:
         # Shutdown workers
         shutdown_event.set()
         
-        if self.worker_pool:
-            self.worker_pool.close()
-            self.worker_pool.join()
+        # Send shutdown signal to all workers
+        for worker_id, (parent_conn, _) in self.worker_pipes.items():
+            try:
+                parent_conn.send(None)
+            except:
+                pass
+        
+        # Wait for processes to exit
+        for p in self.worker_processes:
+            p.join(timeout=5)
+            if p.is_alive():
+                p.terminate()
+        
+        # Close pipes
+        for parent_conn, child_conn in self.worker_pipes.values():
+            parent_conn.close()
+            child_conn.close()
+        
+        # Shutdown executor
+        if self.executor:
+            self.executor.shutdown(wait=True)
             
         logger.info("Multi-model generator shutdown complete")
 
