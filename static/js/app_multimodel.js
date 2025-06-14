@@ -1,4 +1,4 @@
-// Image Generation Studio - Frontend JavaScript
+// Multi-Model Image Generation Studio - Frontend JavaScript
 
 // Global variables
 let ws = null;
@@ -19,7 +19,12 @@ const samplePrompts = [
     "Underwater coral reef teeming with colorful fish",
     "Ancient library with floating books and magical atmosphere",
     "Robot chef cooking in a futuristic kitchen",
-    "Enchanted forest path with glowing mushrooms and fireflies"
+    "Enchanted forest path with glowing mushrooms and fireflies",
+    "Portrait of a wise wizard with a crystal staff",
+    "Futuristic space station orbiting Earth",
+    "Medieval castle during a thunderstorm",
+    "Tranquil beach at golden hour with palm trees",
+    "Abstract colorful explosion of paint and light"
 ];
 
 // Initialize on page load
@@ -27,6 +32,7 @@ document.addEventListener('DOMContentLoaded', function() {
     initializeWebSocket();
     loadHistory();
     setupEventListeners();
+    updateModelDefaults();
     updateDimensionInfo();
     updateEstimatedTime();
 });
@@ -74,8 +80,11 @@ function updateConnectionStatus(connected) {
 
 function handleWebSocketMessage(data) {
     switch(data.type) {
-        case 'queue_update':
-            // Could show queue position if needed
+        case 'model_status':
+            // Update model status if needed
+            break;
+        case 'generation_start':
+            // Could show which GPU/model is processing
             break;
         case 'generation_complete':
             // Generation completed successfully
@@ -97,6 +106,8 @@ function setupEventListeners() {
     // Dimension inputs
     document.getElementById('width').addEventListener('input', updateDimensionInfo);
     document.getElementById('height').addEventListener('input', updateDimensionInfo);
+    document.getElementById('width').addEventListener('input', validateDimensions);
+    document.getElementById('height').addEventListener('input', validateDimensions);
     document.getElementById('width').addEventListener('input', updateEstimatedTime);
     document.getElementById('height').addEventListener('input', updateEstimatedTime);
     
@@ -123,6 +134,95 @@ function setupEventListeners() {
     });
 }
 
+// Model handling
+function updateModelDefaults() {
+    const modelSelect = document.getElementById('model');
+    const selectedOption = modelSelect.options[modelSelect.selectedIndex];
+    
+    if (!selectedOption) return;
+    
+    const modelKey = selectedOption.value;
+    const modelInfo = MODELS_CONFIG[modelKey];
+    
+    if (!modelInfo) return;
+    
+    // Update description
+    document.getElementById('modelDescription').textContent = modelInfo.description;
+    
+    // Update defaults
+    document.getElementById('steps').value = selectedOption.dataset.steps;
+    document.getElementById('stepsValue').textContent = selectedOption.dataset.steps;
+    document.getElementById('guidance').value = selectedOption.dataset.guidance;
+    document.getElementById('guidanceValue').textContent = selectedOption.dataset.guidance;
+    
+    // Update dimension limits
+    const widthInput = document.getElementById('width');
+    const heightInput = document.getElementById('height');
+    
+    widthInput.min = selectedOption.dataset.minWidth;
+    widthInput.max = selectedOption.dataset.maxWidth;
+    heightInput.min = selectedOption.dataset.minHeight;
+    heightInput.max = selectedOption.dataset.maxHeight;
+    
+    // Update dimension presets based on model
+    updateDimensionPresets(modelInfo);
+    
+    // Validate current dimensions
+    validateDimensions();
+    updateEstimatedTime();
+}
+
+function updateDimensionPresets(modelInfo) {
+    const presetsContainer = document.getElementById('dimensionPresets');
+    presetsContainer.innerHTML = '';
+    
+    // Common presets that fit within model limits
+    const presets = [
+        { width: 512, height: 512, label: '512²', icon: 'square' },
+        { width: 768, height: 768, label: '768²', icon: 'square' },
+        { width: 1024, height: 768, label: 'Landscape', icon: 'image' },
+        { width: 768, height: 1024, label: 'Portrait', icon: 'phone' },
+        { width: 1024, height: 1024, label: '1K²', icon: 'square-fill' },
+        { width: 1536, height: 1024, label: 'Wide', icon: 'aspect-ratio' },
+        { width: 1920, height: 1088, label: 'HD', icon: 'tv' },
+    ];
+    
+    presets.forEach(preset => {
+        if (preset.width >= modelInfo.min_width && preset.width <= modelInfo.max_width &&
+            preset.height >= modelInfo.min_height && preset.height <= modelInfo.max_height) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'btn btn-sm btn-outline-primary';
+            btn.onclick = () => setDimensions(preset.width, preset.height);
+            btn.innerHTML = `<i class="bi bi-${preset.icon}"></i> ${preset.label}`;
+            presetsContainer.appendChild(btn);
+        }
+    });
+}
+
+function validateDimensions() {
+    const modelSelect = document.getElementById('model');
+    const selectedOption = modelSelect.options[modelSelect.selectedIndex];
+    
+    if (!selectedOption) return;
+    
+    const width = parseInt(document.getElementById('width').value);
+    const height = parseInt(document.getElementById('height').value);
+    
+    const minWidth = parseInt(selectedOption.dataset.minWidth);
+    const maxWidth = parseInt(selectedOption.dataset.maxWidth);
+    const minHeight = parseInt(selectedOption.dataset.minHeight);
+    const maxHeight = parseInt(selectedOption.dataset.maxHeight);
+    
+    const warning = document.getElementById('dimensionWarning');
+    
+    if (width < minWidth || width > maxWidth || height < minHeight || height > maxHeight) {
+        warning.textContent = `(Model supports ${minWidth}-${maxWidth} × ${minHeight}-${maxHeight})`;
+    } else {
+        warning.textContent = '';
+    }
+}
+
 // Form handling
 async function handleGenerate(e) {
     e.preventDefault();
@@ -132,6 +232,7 @@ async function handleGenerate(e) {
     const formData = new FormData(e.target);
     const data = {
         prompt: formData.get('prompt'),
+        model: formData.get('model'),
         width: parseInt(formData.get('width')),
         height: parseInt(formData.get('height')),
         steps: parseInt(formData.get('steps')),
@@ -150,13 +251,7 @@ async function handleGenerate(e) {
         return;
     }
     
-    const totalPixels = data.width * data.height;
-    if (totalPixels > 8388608) {
-        showError('Total pixels exceed maximum limit (8,388,608)');
-        return;
-    }
-    
-    startGeneration();
+    startGeneration(data.model);
     
     try {
         const response = await fetch('/v1/images/generations', {
@@ -183,7 +278,7 @@ async function handleGenerate(e) {
     }
 }
 
-function startGeneration() {
+function startGeneration(modelKey) {
     isGenerating = true;
     generationStartTime = Date.now();
     
@@ -192,6 +287,10 @@ function startGeneration() {
     document.getElementById('generateBtn').disabled = true;
     document.getElementById('resultContainer').classList.add('d-none');
     document.getElementById('progressContainer').classList.remove('d-none');
+    
+    // Show which model is being used
+    const modelName = MODELS_CONFIG[modelKey]?.name || modelKey;
+    document.getElementById('progressModel').textContent = modelName;
     
     // Start progress timer
     progressInterval = setInterval(updateProgressTime, 100);
@@ -232,11 +331,12 @@ function displayResult(result, params) {
                      onclick="showImageModal()">
                 <div class="row">
                     <div class="col-md-6">
+                        <p class="mb-1"><strong>Model:</strong> ${result.model_name}</p>
                         <p class="mb-1"><strong>Prompt:</strong> ${escapeHtml(params.prompt)}</p>
                         <p class="mb-1"><strong>Dimensions:</strong> ${params.width}×${params.height}</p>
-                        <p class="mb-1"><strong>Steps:</strong> ${params.steps}</p>
                     </div>
                     <div class="col-md-6">
+                        <p class="mb-1"><strong>Steps:</strong> ${params.steps}</p>
                         <p class="mb-1"><strong>Guidance:</strong> ${params.guidance}</p>
                         <p class="mb-1"><strong>Seed:</strong> ${result.seed || 'Random'}</p>
                         <p class="mb-1"><strong>Generation Time:</strong> ${result.gen_time.toFixed(2)}s</p>
@@ -259,6 +359,103 @@ function displayResult(result, params) {
     
     document.getElementById('resultContainer').innerHTML = html;
     document.getElementById('resultContainer').classList.remove('d-none');
+}
+
+// Model status display
+async function showModels() {
+    try {
+        const response = await fetch('/api/models');
+        const models = await response.json();
+        
+        let html = '<div class="table-responsive"><table class="table table-sm">';
+        html += '<thead><tr><th>Model</th><th>Status</th><th>Workers</th><th>Queue</th><th>Dimensions</th></tr></thead><tbody>';
+        
+        for (const [key, info] of Object.entries(models)) {
+            const statusBadge = info.loaded 
+                ? `<span class="badge bg-success">Loaded</span>`
+                : `<span class="badge bg-secondary">Not Loaded</span>`;
+            
+            const dimRange = `${info.min_width}-${info.max_width} × ${info.min_height}-${info.max_height}`;
+            
+            html += `
+                <tr>
+                    <td>
+                        <strong>${info.name}</strong><br>
+                        <small class="text-muted">${info.description}</small>
+                    </td>
+                    <td>${statusBadge}</td>
+                    <td>${info.worker_count}</td>
+                    <td>${info.queue_size}</td>
+                    <td><small>${dimRange}</small></td>
+                </tr>
+            `;
+        }
+        
+        html += '</tbody></table></div>';
+        
+        document.getElementById('modelsContent').innerHTML = html;
+        
+    } catch (error) {
+        document.getElementById('modelsContent').innerHTML = 
+            '<p class="text-danger">Failed to load model information</p>';
+    }
+    
+    const modal = new bootstrap.Modal(document.getElementById('modelsModal'));
+    modal.show();
+}
+
+// Stats display
+async function showStats() {
+    try {
+        const response = await fetch('/api/stats');
+        const data = await response.json();
+        
+        let html = '<h6>Overall Statistics</h6>';
+        html += `
+            <table class="table table-sm stats-table mb-4">
+                <tr>
+                    <td>Total Requests</td>
+                    <td>${data.total_requests}</td>
+                </tr>
+                <tr>
+                    <td>Total Completed</td>
+                    <td>${data.total_completed}</td>
+                </tr>
+            </table>
+        `;
+        
+        if (data.models && Object.keys(data.models).length > 0) {
+            html += '<h6>Model Statistics</h6>';
+            
+            for (const [modelKey, stats] of Object.entries(data.models)) {
+                const modelName = MODELS_CONFIG[modelKey]?.name || modelKey;
+                html += `
+                    <div class="mb-3">
+                        <h6 class="text-primary">${modelName}</h6>
+                        <table class="table table-sm">
+                            <tr>
+                                <td>Requests</td>
+                                <td>${stats.total_requests}</td>
+                            </tr>
+                            <tr>
+                                <td>Average Time</td>
+                                <td>${stats.average_time.toFixed(2)}s</td>
+                            </tr>
+                        </table>
+                    </div>
+                `;
+            }
+        }
+        
+        document.getElementById('statsContent').innerHTML = html;
+        
+    } catch (error) {
+        document.getElementById('statsContent').innerHTML = 
+            '<p class="text-danger">Failed to load statistics</p>';
+    }
+    
+    const modal = new bootstrap.Modal(document.getElementById('statsModal'));
+    modal.show();
 }
 
 // History management
@@ -284,11 +481,12 @@ async function addToHistory(result, params) {
     
     const historyItem = {
         id: Date.now(),
-        thumbnail: thumbnail,  // Store thumbnail instead of full image
-        fullImage: null,       // Don't store full image in history
+        thumbnail: thumbnail,
         params: params,
         seed: result.seed,
         gen_time: result.gen_time,
+        model: result.model,
+        model_name: result.model_name,
         timestamp: new Date().toISOString()
     };
     
@@ -341,7 +539,8 @@ function displayHistory() {
     }
     
     const html = generationHistory.slice().reverse().map(item => `
-        <div class="history-item" onclick="loadFromHistory('${item.id}')" title="${escapeHtml(item.params.prompt)}">
+        <div class="history-item" onclick="loadFromHistory('${item.id}')" 
+             title="${escapeHtml(item.params.prompt)} (${item.model_name || item.model})">
             <img src="data:image/jpeg;base64,${item.thumbnail}" alt="History image">
             <div class="history-info">
                 ${item.params.width}×${item.params.height}
@@ -355,6 +554,12 @@ function displayHistory() {
 function loadFromHistory(id) {
     const item = generationHistory.find(h => h.id == id);
     if (!item) return;
+    
+    // Check if model is available
+    if (item.model && LOADED_MODELS.includes(item.model)) {
+        document.getElementById('model').value = item.model;
+        updateModelDefaults();
+    }
     
     // Load parameters
     document.getElementById('prompt').value = item.params.prompt;
@@ -372,7 +577,6 @@ function loadFromHistory(id) {
     updateDimensionInfo();
     updateEstimatedTime();
     
-    // Note: We don't store full images in history anymore, just show params
     showSuccess('Settings loaded from history');
 }
 
@@ -389,6 +593,7 @@ function setDimensions(width, height) {
     document.getElementById('width').value = width;
     document.getElementById('height').value = height;
     updateDimensionInfo();
+    validateDimensions();
     updateEstimatedTime();
 }
 
@@ -412,14 +617,20 @@ function updateEstimatedTime() {
     const width = parseInt(document.getElementById('width').value);
     const height = parseInt(document.getElementById('height').value);
     const steps = parseInt(document.getElementById('steps').value);
+    const model = document.getElementById('model').value;
     
     // Simple estimation formula (adjust based on your hardware)
     const pixels = width * height;
-    const baseTime = 0.3; // Base time in seconds
+    let baseTime = 0.5; // Base time in seconds
+    
+    // Adjust base time by model
+    if (model === 'flux-dev') baseTime = 1.0;
+    else if (model === 'sdxl') baseTime = 0.8;
+    
     const pixelFactor = pixels / 1000000; // Per million pixels
     const stepFactor = steps / 4; // Normalized to 4 steps
     
-    const estimated = baseTime + (pixelFactor * 0.2) + (stepFactor * 0.15);
+    const estimated = baseTime + (pixelFactor * 0.3) + (stepFactor * 0.2);
     
     document.getElementById('estimatedTime').textContent = 
         `Estimated time: ~${estimated.toFixed(1)}s`;
@@ -453,12 +664,14 @@ function downloadImage() {
     
     const link = document.createElement('a');
     link.href = 'data:image/png;base64,' + currentImage.image;
-    link.download = `generated_${Date.now()}.png`;
+    const modelName = currentImage.model || 'unknown';
+    link.download = `generated_${modelName}_${Date.now()}.png`;
     link.click();
 }
 
 function copySettings() {
     const settings = {
+        model: document.getElementById('model').value,
         prompt: document.getElementById('prompt').value,
         width: parseInt(document.getElementById('width').value),
         height: parseInt(document.getElementById('height').value),
@@ -477,55 +690,6 @@ function useAsSeed() {
         document.getElementById('seed').value = currentImage.seed;
         showSuccess('Seed applied to form');
     }
-}
-
-async function showStats() {
-    try {
-        const response = await fetch('/api/stats');
-        const data = await response.json();
-        
-        const statsHtml = `
-            <table class="table table-sm stats-table">
-                <tr>
-                    <td>Total Requests</td>
-                    <td>${data.stats.total_requests}</td>
-                </tr>
-                <tr>
-                    <td>Completed</td>
-                    <td>${data.stats.total_completed}</td>
-                </tr>
-                <tr>
-                    <td>Average Time</td>
-                    <td>${data.stats.average_time.toFixed(2)}s</td>
-                </tr>
-                <tr>
-                    <td>Queue Length</td>
-                    <td>${data.queue_length}</td>
-                </tr>
-                <tr>
-                    <td>Active GPUs</td>
-                    <td>${data.num_gpus}</td>
-                </tr>
-            </table>
-            <h6 class="mt-3">Popular Dimensions</h6>
-            <ul class="list-unstyled">
-                ${Object.entries(data.stats.dimension_counts || {})
-                    .sort((a, b) => b[1] - a[1])
-                    .slice(0, 5)
-                    .map(([dim, count]) => `<li>${dim}: ${count} times</li>`)
-                    .join('')}
-            </ul>
-        `;
-        
-        document.getElementById('statsContent').innerHTML = statsHtml;
-        
-    } catch (error) {
-        document.getElementById('statsContent').innerHTML = 
-            '<p class="text-danger">Failed to load statistics</p>';
-    }
-    
-    const modal = new bootstrap.Modal(document.getElementById('statsModal'));
-    modal.show();
 }
 
 // Helper functions
