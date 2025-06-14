@@ -145,14 +145,14 @@ async function handleGenerate(e) {
     }
     
     // Validate dimensions
-    if (data.width % 8 !== 0 || data.height % 8 !== 0) {
-        showError('Width and height must be divisible by 8');
+    if (data.width % 16 !== 0 || data.height % 16 !== 0) {
+        showError('Width and height must be divisible by 16');
         return;
     }
     
     const totalPixels = data.width * data.height;
-    if (totalPixels > 2097152) {
-        showError('Total pixels exceed maximum limit (2,097,152)');
+    if (totalPixels > 8388608) {
+        showError('Total pixels exceed maximum limit (8,388,608)');
         return;
     }
     
@@ -279,9 +279,13 @@ function saveHistory() {
 }
 
 function addToHistory(result, params) {
+    // Create a thumbnail to save space in localStorage
+    const thumbnail = createThumbnail(result.image, 128, 128);
+    
     const historyItem = {
         id: Date.now(),
-        image: result.image,
+        thumbnail: thumbnail,  // Store thumbnail instead of full image
+        fullImage: null,       // Don't store full image in history
         params: params,
         seed: result.seed,
         gen_time: result.gen_time,
@@ -291,6 +295,39 @@ function addToHistory(result, params) {
     generationHistory.push(historyItem);
     saveHistory();
     displayHistory();
+}
+
+function createThumbnail(base64Image, maxWidth, maxHeight) {
+    // Create thumbnail on canvas to reduce size
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    const img = new Image();
+    
+    // This is synchronous for now, could be made async if needed
+    img.src = 'data:image/png;base64,' + base64Image;
+    
+    // Calculate thumbnail dimensions
+    let width = img.width;
+    let height = img.height;
+    
+    if (width > height) {
+        if (width > maxWidth) {
+            height = Math.round(height * maxWidth / width);
+            width = maxWidth;
+        }
+    } else {
+        if (height > maxHeight) {
+            width = Math.round(width * maxHeight / height);
+            height = maxHeight;
+        }
+    }
+    
+    canvas.width = width;
+    canvas.height = height;
+    ctx.drawImage(img, 0, 0, width, height);
+    
+    // Return base64 thumbnail without data URL prefix
+    return canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
 }
 
 function displayHistory() {
@@ -303,7 +340,7 @@ function displayHistory() {
     
     const html = generationHistory.slice().reverse().map(item => `
         <div class="history-item" onclick="loadFromHistory('${item.id}')" title="${escapeHtml(item.params.prompt)}">
-            <img src="data:image/png;base64,${item.image}" alt="History image">
+            <img src="data:image/jpeg;base64,${item.thumbnail}" alt="History image">
             <div class="history-info">
                 ${item.params.width}×${item.params.height}
             </div>
@@ -333,12 +370,8 @@ function loadFromHistory(id) {
     updateDimensionInfo();
     updateEstimatedTime();
     
-    // Display the image
-    displayResult({
-        image: item.image,
-        seed: item.seed,
-        gen_time: item.gen_time
-    }, item.params);
+    // Note: We don't store full images in history anymore, just show params
+    showSuccess('Settings loaded from history');
 }
 
 function clearHistory() {
@@ -500,13 +533,38 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+function showToast(message, type = 'info') {
+    // Create toast container if it doesn't exist
+    let toastContainer = document.getElementById('toastContainer');
+    if (!toastContainer) {
+        toastContainer = document.createElement('div');
+        toastContainer.id = 'toastContainer';
+        toastContainer.style.cssText = 'position: fixed; top: 20px; right: 20px; z-index: 9999;';
+        document.body.appendChild(toastContainer);
+    }
+    
+    // Create toast element
+    const toast = document.createElement('div');
+    toast.className = `alert alert-${type === 'error' ? 'danger' : type} alert-dismissible fade show`;
+    toast.style.cssText = 'min-width: 250px; margin-bottom: 10px;';
+    toast.innerHTML = `
+        ${message}
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    `;
+    
+    toastContainer.appendChild(toast);
+    
+    // Auto remove after 5 seconds
+    setTimeout(() => {
+        toast.classList.remove('show');
+        setTimeout(() => toast.remove(), 150);
+    }, 5000);
+}
+
 function showError(message) {
-    // You could implement a toast notification here
-    console.error(message);
-    alert('Error: ' + message);
+    showToast(message, 'error');
 }
 
 function showSuccess(message) {
-    // You could implement a toast notification here
-    console.log(message);
+    showToast(message, 'success');
 }

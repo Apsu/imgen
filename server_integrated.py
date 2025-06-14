@@ -27,7 +27,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from torch import Generator
 from diffusers import AutoPipelineForText2Image
 from diffusers.utils import logging as diffusers_logging
@@ -75,10 +75,10 @@ generation_stats = {
 }
 stats_lock = threading.Lock()
 
-# Allowed dimensions - must be divisible by 8 for VAE
+# Allowed dimensions - must be divisible by 16 for VAE
 ALLOWED_DIMENSIONS = [
     (256, 256),   # Tiny
-    (512, 384),   # Small landscape
+    (512, 384),   # Small landscape  
     (384, 512),   # Small portrait
     (512, 512),   # Square
     (768, 512),   # Wide
@@ -87,16 +87,16 @@ ALLOWED_DIMENSIONS = [
     (1024, 768),  # Landscape
     (768, 1024),  # Portrait
     (1024, 1024), # Large square
-    (1280, 720),  # 720p
-    (1920, 1080), # 1080p
+    (1280, 768),  # Wide HD (adjusted from 720)
+    (1920, 1088), # Full HD (adjusted from 1080)
     (1536, 1024), # Wide
     (1024, 1536), # Tall
     (2048, 1152), # Ultra wide
     (1152, 2048), # Ultra tall
 ]
 
-# Max total pixels to prevent OOM
-MAX_TOTAL_PIXELS = 2097152  # 2048x1024
+# Max total pixels - we have 80GB VRAM per GPU!
+MAX_TOTAL_PIXELS = 8388608  # 4096x2048
 
 # Common steps
 ALLOWED_STEPS = [1, 4, 8, 12, 16, 20, 30, 50]
@@ -111,16 +111,17 @@ class TextToImageInput(BaseModel):
     guidance: float = Field(0.0, ge=0.0, le=20.0)
     seed: Optional[int] = Field(None, ge=-2147483648, le=2147483647)
     
-    @validator('width', 'height')
+    @field_validator('width', 'height')
     def dimensions_divisible_by_8(cls, v):
-        if v % 8 != 0:
-            raise ValueError('Dimensions must be divisible by 8')
+        # Actually needs to be divisible by 16 for some models
+        if v % 16 != 0:
+            raise ValueError('Dimensions must be divisible by 16')
         return v
     
-    @validator('height')
-    def total_pixels_limit(cls, v, values):
-        if 'width' in values:
-            total_pixels = values['width'] * v
+    @field_validator('height')
+    def total_pixels_limit(cls, v, info):
+        if 'width' in info.data:
+            total_pixels = info.data['width'] * v
             if total_pixels > MAX_TOTAL_PIXELS:
                 raise ValueError(f'Total pixels ({total_pixels}) exceeds limit ({MAX_TOTAL_PIXELS})')
         return v
@@ -235,7 +236,7 @@ def worker_generate_image(args):
     start_time = time.time()
     
     # Perform the actual image generation
-    with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+    with torch.amp.autocast('cuda', dtype=torch.bfloat16):
         output = pipeline(**gen_args, generator=generator, output_type="pil")
     
     elapsed = time.time() - start_time
