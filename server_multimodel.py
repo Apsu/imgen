@@ -127,18 +127,18 @@ AVAILABLE_MODELS = {
         vram_gb=12.0,
         description="Aesthetic-focused model"
     ),
-    "turbo": ModelConfig(
-        name="SDXL Turbo",
-        model_id="stabilityai/sdxl-turbo",
-        pipeline_class=AutoPipelineForText2Image,
-        default_steps=2,  # 1-4 steps work, 2 is more stable
-        default_guidance=0.0,
+    "juggernaut": ModelConfig(
+        name="Juggernaut XL v9",
+        model_id="RunDiffusion/Juggernaut-XL-v9",
+        pipeline_class=StableDiffusionXLPipeline,
+        default_steps=30,
+        default_guidance=7.0,
         min_width=512,
-        max_width=512,
+        max_width=2048,
         min_height=512,
-        max_height=512,
-        vram_gb=8.0,
-        description="Ultra-fast SDXL generation (1-4 steps)"
+        max_height=2048,
+        vram_gb=10.0,
+        description="High-quality portraits and photorealistic imagery"
     ),
     "realvisxl": ModelConfig(
         name="RealVisXL V4",
@@ -254,20 +254,11 @@ def worker_process(worker_id: int, model_key: str, gpu_id: int, pipe: mp.Pipe, r
 
         # Load the appropriate model
         if model_config.pipeline_class == AutoPipelineForText2Image:
-            # Special handling for SDXL Turbo
-            if model_key == "turbo":
-                pipeline = AutoPipelineForText2Image.from_pretrained(
-                    model_config.model_id,
-                    torch_dtype=torch.float16,
-                    variant="fp16",
-                    use_safetensors=True,
-                ).to(device)
-            else:
-                pipeline = AutoPipelineForText2Image.from_pretrained(
-                    model_config.model_id,
-                    torch_dtype=torch.bfloat16,
-                    use_safetensors=True,
-                ).to(device)
+            pipeline = AutoPipelineForText2Image.from_pretrained(
+                model_config.model_id,
+                torch_dtype=torch.bfloat16,
+                use_safetensors=True,
+            ).to(device)
         else:
             # For specific pipeline classes
             # Some models don't have fp16 variant
@@ -354,9 +345,7 @@ def worker_process(worker_id: int, model_key: str, gpu_id: int, pipe: mp.Pipe, r
                 start_time = time.time()
                 
                 # Generate image
-                # Use float16 for turbo, bfloat16 for others
-                dtype = torch.float16 if model_key == "turbo" else torch.bfloat16
-                with torch.amp.autocast('cuda', dtype=dtype):
+                with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                     output = pipeline(**gen_args, generator=generator, output_type="pil")
                 
                 elapsed = time.time() - start_time
@@ -364,17 +353,6 @@ def worker_process(worker_id: int, model_key: str, gpu_id: int, pipe: mp.Pipe, r
                 # Convert to base64
                 buffered = io.BytesIO()
                 image = output.images[0]
-                
-                # Fix for SDXL Turbo potential blank images
-                if model_key == "turbo":
-                    import numpy as np
-                    from PIL import Image
-                    # Convert to numpy array and ensure proper range
-                    img_array = np.array(image)
-                    if img_array.max() <= 1.0:
-                        img_array = (img_array * 255).clip(0, 255).astype(np.uint8)
-                    image = Image.fromarray(img_array)
-                
                 image.save(buffered, format="PNG")
                 img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
                 
