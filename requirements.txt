@@ -1,6 +1,6 @@
 accelerate
 aiohttp
-diffusers
+git+https://github.com/huggingface/diffusers.git@main
 fastapi
 jinja2
 protobuf

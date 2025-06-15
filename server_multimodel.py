@@ -30,7 +30,21 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, field_validator
 from torch import Generator
-from diffusers import AutoPipelineForText2Image, StableDiffusionXLPipeline, StableDiffusionPipeline
+from diffusers import (
+    AutoPipelineForText2Image, 
+    StableDiffusionXLPipeline, 
+    StableDiffusionPipeline,
+    SanaPipeline,
+    SanaSprintPipeline,
+    HunyuanDiTPipeline, 
+    PixArtSigmaPipeline,
+    StableCascadePriorPipeline,
+    StableCascadeDecoderPipeline,
+    LuminaPipeline,
+    ChromaPipeline,
+    ChromaTransformer2DModel
+)
+from transformers import T5EncoderModel, T5Tokenizer
 from diffusers.utils import logging as diffusers_logging
 
 # Disable tokenizers parallelism warning
@@ -171,13 +185,118 @@ AVAILABLE_MODELS = {
         model_id="cagliostrolab/animagine-xl-4.0",
         pipeline_class=StableDiffusionXLPipeline,
         default_steps=25,
-        default_guidance=7.0,
+        default_guidance=6.0,  # Updated to recommended value
         min_width=512,
         max_width=2048,
         min_height=512,
         max_height=2048,
         vram_gb=10.0,
         description="High-quality anime-style generation v4"
+    ),
+    # --- Cutting-Edge Diffusion Transformer Models ---
+    "sana": ModelConfig(
+        name="Sana 1600M 1K",  # Using 1024px version for better quality
+        model_id="Efficient-Large-Model/Sana_1600M_1024px_BF16_diffusers",
+        pipeline_class=SanaPipeline,
+        default_steps=20,
+        default_guidance=4.5,
+        min_width=512,
+        max_width=1024,  # 1024px version has better quality
+        min_height=512,
+        max_height=1024,
+        vram_gb=12.0,
+        description="High-quality 1K generation with Linear DiT"
+    ),
+    "hunyuan": ModelConfig(
+        name="HunyuanDiT Bilingual",
+        model_id="Tencent-Hunyuan/HunyuanDiT-Diffusers",
+        pipeline_class=HunyuanDiTPipeline,
+        default_steps=50,
+        default_guidance=5.0,  # Updated to match documentation
+        min_width=512,
+        max_width=2048,
+        min_height=512,
+        max_height=2048,
+        vram_gb=12.0,
+        description="Bilingual (EN/CN) understanding with cultural context"
+    ),
+    "pixart": ModelConfig(
+        name="PixArt-Sigma XL",
+        model_id="PixArt-alpha/PixArt-Sigma-XL-2-1024-MS",
+        pipeline_class=PixArtSigmaPipeline,
+        default_steps=20,
+        default_guidance=4.5,
+        min_width=512,
+        max_width=2048,
+        min_height=512,
+        max_height=2048,
+        vram_gb=8.0,
+        description="Ultra-efficient 0.6B param model, exceptional prompt adherence"
+    ),
+    "sana-sprint": ModelConfig(
+        name="Sana Sprint 1.6B",
+        model_id="Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers",
+        pipeline_class=SanaSprintPipeline,
+        default_steps=2,
+        default_guidance=4.5,
+        min_width=512,
+        max_width=1024,
+        min_height=512,
+        max_height=1024,
+        vram_gb=8.0,
+        description="Ultra-fast 1-4 step generation, NVIDIA/MIT/HF collaboration"
+    ),
+    "sana-sprint-small": ModelConfig(
+        name="Sana Sprint 0.6B",
+        model_id="Efficient-Large-Model/Sana_Sprint_0.6B_1024px_diffusers",
+        pipeline_class=SanaSprintPipeline,
+        default_steps=2,
+        default_guidance=4.5,
+        min_width=512,
+        max_width=1024,
+        min_height=512,
+        max_height=1024,
+        vram_gb=5.0,
+        description="Smallest ultra-fast model, 1-4 step generation"
+    ),
+    "stable-cascade": ModelConfig(
+        name="Stable Cascade",
+        model_id="stabilityai/stable-cascade-prior",  # Will need special handling for decoder
+        pipeline_class=StableCascadePriorPipeline,
+        default_steps=20,
+        default_guidance=4.0,
+        min_width=1024,
+        max_width=1536,  # Stable Cascade supports up to 1536
+        min_height=1024,
+        max_height=1536,
+        vram_gb=20.0,  # Prior + Decoder
+        description="Würstchen v3: Revolutionary two-stage 24x24 latent architecture"
+    ),
+    "lumina-next": ModelConfig(
+        name="Lumina-Next 2B",
+        model_id="Alpha-VLLM/Lumina-Next-SFT-diffusers",
+        pipeline_class=LuminaPipeline,
+        default_steps=30,
+        default_guidance=3.5,
+        min_width=512,
+        max_width=2048,
+        min_height=512,
+        max_height=2048,
+        vram_gb=12.0,
+        description="2B DiT model with Gemma-2B text encoder, high quality"
+    ),
+    "chroma": ModelConfig(
+        name="Chroma 8.9B",
+        model_id="lodestones/Chroma",
+        pipeline_class=ChromaPipeline,
+        default_steps=4,
+        default_guidance=3.5,
+        min_width=512,
+        max_width=2048,
+        min_height=512,
+        max_height=2048,
+        vram_gb=16.0,
+        description="Uncensored FLUX variant, 8.9B params, Apache 2.0"
     ),
 }
 
@@ -253,47 +372,186 @@ def worker_process(worker_id: int, model_key: str, gpu_id: int, pipe: mp.Pipe, r
         torch.backends.cudnn.allow_tf32 = True
 
         # Load the appropriate model
-        if model_config.pipeline_class == AutoPipelineForText2Image:
-            pipeline = AutoPipelineForText2Image.from_pretrained(
-                model_config.model_id,
+        if model_key == "stable-cascade":
+            # Special handling for Stable Cascade two-stage model
+            logger.info(f"Loading Stable Cascade two-stage model on GPU {gpu_id}")
+            prior = StableCascadePriorPipeline.from_pretrained(
+                "stabilityai/stable-cascade-prior",
                 torch_dtype=torch.bfloat16,
                 use_safetensors=True,
+                variant="bf16",
+            ).to(device)
+            decoder = StableCascadeDecoderPipeline.from_pretrained(
+                "stabilityai/stable-cascade",
+                torch_dtype=torch.bfloat16,
+                use_safetensors=True,
+                variant="bf16",
+            ).to(device)
+            # Store both pipelines as a tuple
+            pipeline = (prior, decoder)
+        elif model_key == "chroma":
+            # Special handling for Chroma model using from_single_file
+            logger.info(f"Loading Chroma model using from_single_file on GPU {gpu_id}")
+            bfl_repo = "black-forest-labs/FLUX.1-dev"
+            
+            # Load Chroma transformer
+            transformer = ChromaTransformer2DModel.from_single_file(
+                "https://huggingface.co/lodestones/Chroma/blob/main/chroma-unlocked-v36.safetensors",
+                torch_dtype=torch.bfloat16
+            )
+            
+            # Load text encoder and tokenizer from FLUX
+            text_encoder = T5EncoderModel.from_pretrained(
+                bfl_repo, 
+                subfolder="text_encoder_2", 
+                torch_dtype=torch.bfloat16
+            )
+            tokenizer = T5Tokenizer.from_pretrained(
+                bfl_repo, 
+                subfolder="tokenizer_2"
+            )
+            
+            # Create pipeline
+            pipeline = ChromaPipeline.from_pretrained(
+                bfl_repo, 
+                transformer=transformer, 
+                text_encoder=text_encoder, 
+                tokenizer=tokenizer, 
+                torch_dtype=torch.bfloat16
+            ).to(device)
+        elif model_key in ["sana-sprint", "sana-sprint-small"]:
+            # Special handling for Sana Sprint models according to documentation
+            logger.info(f"Loading Sana Sprint model {model_config.name} with recommended dtype settings")
+            pipeline = SanaSprintPipeline.from_pretrained(
+                model_config.model_id,
+                torch_dtype=torch.bfloat16,  # Recommended dtype as per documentation
+                use_safetensors=True,
+            ).to(device)
+        elif model_config.pipeline_class == AutoPipelineForText2Image:
+            # AutoPipeline models: FLUX uses bfloat16, Playground uses float16
+            if "flux" in model_key:
+                dtype = torch.bfloat16
+                variant = None
+            elif "playground" in model_key:
+                dtype = torch.float16
+                variant = "fp16" if "fp16" in model_config.model_id else None
+            else:
+                dtype = torch.bfloat16
+                variant = None
+                
+            pipeline = AutoPipelineForText2Image.from_pretrained(
+                model_config.model_id,
+                torch_dtype=dtype,
+                use_safetensors=True,
+                variant=variant,
             ).to(device)
         else:
             # For specific pipeline classes
-            # Some models don't have fp16 variant
+            # Determine appropriate dtype based on model type
+            if model_config.pipeline_class == StableDiffusionXLPipeline:
+                # SDXL models should use float16
+                dtype = torch.float16
+                variant = "fp16"
+            elif model_config.pipeline_class == SanaPipeline:
+                # Sana needs special handling - see issue #10241
+                # Load with float16 for transformer, but components need different dtypes
+                dtype = torch.float16  # For transformer
+                variant = "bf16"
+            elif model_config.pipeline_class == LuminaPipeline:
+                # Lumina uses bfloat16
+                dtype = torch.bfloat16
+                variant = None
+            elif model_config.pipeline_class == HunyuanDiTPipeline:
+                # HunyuanDiT works better with bfloat16 to avoid quality issues
+                dtype = torch.bfloat16
+                variant = None
+            elif model_config.pipeline_class == PixArtSigmaPipeline:
+                # PixArt-Sigma can use float16
+                dtype = torch.float16
+                variant = None
+            else:
+                # Default to bfloat16 for other models
+                dtype = torch.bfloat16
+                variant = None
+            
             try:
                 pipeline = model_config.pipeline_class.from_pretrained(
                     model_config.model_id,
-                    torch_dtype=torch.bfloat16,
+                    torch_dtype=dtype,
                     use_safetensors=True,
-                    variant="fp16" if "xl" in model_config.model_id.lower() else None,
+                    variant=variant,
                 ).to(device)
             except ValueError as e:
-                if "variant=fp16" in str(e):
+                if "variant" in str(e):
                     # Try without variant
-                    logger.info(f"Model {model_config.name} doesn't have fp16 variant, loading without variant")
+                    logger.info(f"Model {model_config.name} doesn't have {variant} variant, loading without variant")
                     pipeline = model_config.pipeline_class.from_pretrained(
                         model_config.model_id,
-                        torch_dtype=torch.bfloat16,
+                        torch_dtype=dtype,
                         use_safetensors=True,
                     ).to(device)
                 else:
                     raise
 
         # Optimize model components if available
-        if hasattr(pipeline, 'transformer'):
-            pipeline.transformer.to(memory_format=torch.channels_last)
-            if hasattr(pipeline.transformer, 'fuse_qkv_projections'):
-                pipeline.transformer.fuse_qkv_projections()
+        # Skip optimization for DiT models and Stable Cascade to avoid compatibility issues
+        is_dit_model = model_config.pipeline_class.__name__ in ['SanaPipeline', 'SanaSprintPipeline', 'PixArtSigmaPipeline', 'LuminaPipeline', 'ChromaPipeline']
         
-        if hasattr(pipeline, 'vae'):
-            pipeline.vae.to(memory_format=torch.channels_last)
-            if hasattr(pipeline.vae, 'fuse_qkv_projections'):
-                pipeline.vae.fuse_qkv_projections()
+        if model_key == "stable-cascade":
+            # Skip optimizations for Stable Cascade two-stage model
+            logger.info(f"Worker {worker_id} skipping optimizations for Stable Cascade two-stage model")
+            # Disable progress bars for both pipelines
+            prior, decoder = pipeline
+            prior.set_progress_bar_config(disable=True)
+            decoder.set_progress_bar_config(disable=True)
+        elif model_key == "chroma":
+            # Skip optimizations for Chroma model
+            logger.info(f"Worker {worker_id} skipping optimizations for Chroma model")
+            # Disable progress bars
+            pipeline.set_progress_bar_config(disable=True)
+        elif model_key in ["sana-sprint", "sana-sprint-small"]:
+            # Skip optimizations for Sana Sprint models
+            logger.info(f"Worker {worker_id} skipping optimizations for Sana Sprint model {model_config.name}")
+            # Disable progress bars
+            pipeline.set_progress_bar_config(disable=True)
+        elif model_key == "hunyuan":
+            # HunyuanDiT benefits from memory layout optimization
+            logger.info(f"Worker {worker_id} applying memory layout optimization for HunyuanDiT")
+            if hasattr(pipeline, 'transformer'):
+                pipeline.transformer.to(memory_format=torch.channels_last)
+            if hasattr(pipeline, 'vae'):
+                pipeline.vae.to(memory_format=torch.channels_last)
+            # Disable progress bars
+            pipeline.set_progress_bar_config(disable=True)
+        elif not is_dit_model:
+            if hasattr(pipeline, 'transformer'):
+                pipeline.transformer.to(memory_format=torch.channels_last)
+                if hasattr(pipeline.transformer, 'fuse_qkv_projections'):
+                    pipeline.transformer.fuse_qkv_projections()
+            
+            if hasattr(pipeline, 'vae'):
+                pipeline.vae.to(memory_format=torch.channels_last)
+                if hasattr(pipeline.vae, 'fuse_qkv_projections'):
+                    pipeline.vae.fuse_qkv_projections()
+            # Disable progress bars
+            pipeline.set_progress_bar_config(disable=True)
+        elif model_key == "sana":
+            # Special handling for Sana to fix quality issues (see diffusers issue #10241)
+            logger.info(f"Worker {worker_id} applying special dtype handling for Sana")
+            # Text encoder MUST be bfloat16
+            if hasattr(pipeline, 'text_encoder'):
+                pipeline.text_encoder = pipeline.text_encoder.to(torch.bfloat16)
+            # VAE should be fp32 or bf16 (NOT fp16 to avoid black results)
+            if hasattr(pipeline, 'vae'):
+                pipeline.vae = pipeline.vae.to(torch.bfloat16)
+            # Transformer stays at float16 as loaded
+            # Disable progress bars
+            pipeline.set_progress_bar_config(disable=True)
+        else:
+            logger.info(f"Worker {worker_id} skipping advanced optimizations for DiT model {model_config.name}")
+            # Disable progress bars
+            pipeline.set_progress_bar_config(disable=True)
 
-        # Disable progress bars
-        pipeline.set_progress_bar_config(disable=True)
 
         generator = Generator(device)
 
@@ -304,10 +562,39 @@ def worker_process(worker_id: int, model_key: str, gpu_id: int, pipe: mp.Pipe, r
             "prompt": "warmup",
             "width": max(512, model_config.min_width),
             "height": max(512, model_config.min_height),
-            "num_inference_steps": 1,
+            "num_inference_steps": max(1, min(model_config.default_steps, 2)),  # Use model default, but cap at 2 for warmup
             "guidance_scale": model_config.default_guidance,
         }
-        _ = pipeline(**warmup_args, output_type="pil")
+        
+        if model_key == "stable-cascade":
+            # Special warmup for Stable Cascade
+            prior, decoder = pipeline
+            prior_output = prior(**warmup_args, output_type="pt")
+            # Decoder doesn't accept width/height, only prompt and basic params
+            decoder_args = {
+                "prompt": warmup_args["prompt"],
+                "num_inference_steps": 10,
+                "guidance_scale": 0.0,
+            }
+            _ = decoder(image_embeddings=prior_output.image_embeddings, output_type="pil", **decoder_args)
+        elif model_key == "chroma":
+            # Warmup for Chroma using recommended settings
+            chroma_warmup_args = {
+                "prompt": "warmup",
+                "guidance_scale": 4.0,
+                "num_inference_steps": 4,  # Use fewer steps for warmup
+            }
+            _ = pipeline(**chroma_warmup_args, output_type="pil")
+        elif model_key in ["sana-sprint", "sana-sprint-small"]:
+            # Warmup for Sana Sprint using recommended settings
+            sana_sprint_warmup_args = {
+                "prompt": "warmup",
+                "num_inference_steps": 2,  # Default recommended steps
+                "guidance_scale": 4.5,     # Default recommended guidance
+            }
+            _ = pipeline(**sana_sprint_warmup_args, output_type="pil")
+        else:
+            _ = pipeline(**warmup_args, output_type="pil")
         logger.info(f"Worker {worker_id} warmup complete")
         
         # Store pipeline info in global
@@ -346,7 +633,24 @@ def worker_process(worker_id: int, model_key: str, gpu_id: int, pipe: mp.Pipe, r
                 
                 # Generate image
                 with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                    output = pipeline(**gen_args, generator=generator, output_type="pil")
+                    if model_key == "stable-cascade":
+                        # Special handling for Stable Cascade two-stage model
+                        prior, decoder = pipeline
+                        prior_output = prior(**gen_args, generator=generator, output_type="pt")
+                        output = decoder(
+                            image_embeddings=prior_output.image_embeddings,
+                            prompt=gen_args["prompt"],
+                            num_inference_steps=10,  # Decoder uses fewer steps
+                            guidance_scale=0.0,  # Decoder doesn't use guidance
+                            generator=generator,
+                            output_type="pil"
+                        )
+                    elif model_key in ['sana-sprint', 'sana-sprint-small']:
+                        # Always pass intermediate_timesteps=None for Sana Sprint
+                        gen_args['intermediate_timesteps'] = None
+                        output = pipeline(**gen_args, generator=generator, output_type="pil")
+                    else:
+                        output = pipeline(**gen_args, generator=generator, output_type="pil")
                 
                 elapsed = time.time() - start_time
                 
@@ -446,7 +750,7 @@ class MultiModelGenerator:
         # Wait for workers to be ready
         ready_count = 0
         errors = []
-        timeout = 120
+        timeout = 300  # Increased for DiT models which take longer to initialize
         start_time = time.time()
         
         while ready_count < len(worker_args):
