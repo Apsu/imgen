@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a FastAPI-based image generation server that uses diffusion models (default: FLUX.1-schnell) with multi-GPU support. The server implements a worker pool pattern for efficient parallel image generation across multiple GPUs.
+This is a FastAPI-based image generation server supporting 15+ diffusion models with multi-GPU support. The server implements a worker pool pattern for efficient parallel image generation across multiple GPUs and includes a web UI for easy interaction.
 
 ## Common Development Commands
 

@@ -113,14 +113,14 @@ pip install -r requirements.txt
 
 ```bash
 # Basic usage (defaults to 8000 port, all available GPUs)
-python server_multimodel.py
+python server.py
 
 # Custom configuration
-python server_multimodel.py --host 0.0.0.0 --port 8080 --num-gpus 4
+python server.py --host 0.0.0.0 --port 8080 --num-gpus 4
 
 # Specific GPUs only
 export CUDA_VISIBLE_DEVICES="0,1,2,3"
-python server_multimodel.py
+python server.py
 ```
 
 ### Web Interface
