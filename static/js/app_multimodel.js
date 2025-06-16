@@ -1,4 +1,4 @@
-// Multi-Model Image Generation Studio - Frontend JavaScript
+// Lambda Image Studio - Frontend JavaScript
 
 // Global variables
 let ws = null;
@@ -152,8 +152,32 @@ function updateModelDefaults() {
     // Update defaults
     document.getElementById('steps').value = selectedOption.dataset.steps;
     document.getElementById('stepsValue').textContent = selectedOption.dataset.steps;
-    document.getElementById('guidance').value = selectedOption.dataset.guidance;
-    document.getElementById('guidanceValue').textContent = selectedOption.dataset.guidance;
+    
+    // Handle guidance scale based on model support
+    const supportsGuidance = selectedOption.dataset.supportsGuidance === 'true';
+    const guidanceInput = document.getElementById('guidance');
+    const guidanceContainer = document.getElementById('guidanceContainer');
+    
+    if (supportsGuidance) {
+        guidanceContainer.style.display = '';  // Reset to default display
+        guidanceInput.disabled = false;
+        guidanceInput.value = selectedOption.dataset.guidance;
+        document.getElementById('guidanceValue').textContent = selectedOption.dataset.guidance;
+    } else {
+        guidanceContainer.style.display = 'none';
+        guidanceInput.value = 0;
+    }
+    
+    // Handle negative prompt based on model support
+    const supportsNegativePrompt = selectedOption.dataset.supportsNegativePrompt === 'true';
+    const negativePromptContainer = document.getElementById('negativePromptContainer');
+    
+    if (supportsNegativePrompt) {
+        negativePromptContainer.style.display = '';  // Show
+    } else {
+        negativePromptContainer.style.display = 'none';  // Hide
+        document.getElementById('negativePrompt').value = '';  // Clear value
+    }
     
     // Update dimension limits
     const widthInput = document.getElementById('width');
@@ -176,28 +200,127 @@ function updateDimensionPresets(modelInfo) {
     const presetsContainer = document.getElementById('dimensionPresets');
     presetsContainer.innerHTML = '';
     
-    // Common presets that fit within model limits
-    const presets = [
-        { width: 512, height: 512, label: '512²', icon: 'square' },
-        { width: 768, height: 768, label: '768²', icon: 'square' },
-        { width: 1024, height: 768, label: 'Landscape', icon: 'image' },
-        { width: 768, height: 1024, label: 'Portrait', icon: 'phone' },
-        { width: 1024, height: 1024, label: '1K²', icon: 'square-fill' },
-        { width: 1536, height: 1024, label: 'Wide', icon: 'aspect-ratio' },
-        { width: 1920, height: 1088, label: 'HD', icon: 'tv' },
-    ];
+    const modelKey = document.getElementById('model').value;
     
-    presets.forEach(preset => {
-        if (preset.width >= modelInfo.min_width && preset.width <= modelInfo.max_width &&
-            preset.height >= modelInfo.min_height && preset.height <= modelInfo.max_height) {
+    // Special handling for HunyuanDiT - only show supported resolutions
+    if (modelKey === 'hunyuan') {
+        const hunyuanPresets = [
+            { width: 1024, height: 1024, label: '1024²', icon: 'square' },
+            { width: 1280, height: 1280, label: '1280²', icon: 'square-fill' },
+            { width: 1024, height: 768, label: '4:3 Landscape', icon: 'image' },
+            { width: 1280, height: 960, label: '4:3 Wide', icon: 'aspect-ratio' },
+            { width: 768, height: 1024, label: '3:4 Portrait', icon: 'phone' },
+            { width: 960, height: 1280, label: '3:4 Tall', icon: 'phone' },
+        ];
+        
+        hunyuanPresets.forEach(preset => {
             const btn = document.createElement('button');
             btn.type = 'button';
             btn.className = 'btn btn-sm btn-outline-primary';
             btn.onclick = () => setDimensions(preset.width, preset.height);
             btn.innerHTML = `<i class="bi bi-${preset.icon}"></i> ${preset.label}`;
             presetsContainer.appendChild(btn);
-        }
-    });
+        });
+        
+        // Add warning about supported resolutions
+        const warning = document.createElement('div');
+        warning.className = 'text-warning small mt-2';
+        warning.innerHTML = '<i class="bi bi-exclamation-triangle"></i> HunyuanDiT only supports specific resolutions';
+        presetsContainer.appendChild(warning);
+    } else if (modelKey === 'pixart') {
+        // PixArt Sigma special presets including high-res options
+        const pixartPresets = [
+            // Standard resolutions
+            { width: 1024, height: 1024, label: '1024²', icon: 'square' },
+            { width: 1280, height: 768, label: 'HD Landscape', icon: 'image' },
+            { width: 768, height: 1280, label: 'HD Portrait', icon: 'phone' },
+            
+            // High-resolution options
+            { width: 1536, height: 1024, label: '1.5K Wide', icon: 'aspect-ratio' },
+            { width: 2048, height: 1152, label: '2K Wide', icon: 'tv' },
+            { width: 2048, height: 2048, label: '2K²', icon: 'square-fill' },
+            
+            // 4K options
+            { width: 2880, height: 1616, label: '3K Wide', icon: 'display' },
+            { width: 4096, height: 2304, label: '4K Wide', icon: 'display-fill' },
+            { width: 3072, height: 3072, label: '3K²', icon: 'grid-3x3' },
+        ];
+        
+        pixartPresets.forEach(preset => {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'btn btn-sm btn-outline-primary';
+            btn.onclick = () => setDimensions(preset.width, preset.height);
+            btn.innerHTML = `<i class="bi bi-${preset.icon}"></i> ${preset.label}`;
+            presetsContainer.appendChild(btn);
+        });
+        
+        // Add info about PixArt's high-res capabilities
+        const info = document.createElement('div');
+        info.className = 'text-info small mt-2';
+        info.innerHTML = '<i class="bi bi-info-circle"></i> PixArt supports excellent quality up to 4K resolution';
+        presetsContainer.appendChild(info);
+    } else if (modelKey === 'flux-schnell' || modelKey === 'flux-dev') {
+        // FLUX models support up to 2K with excellent quality
+        const fluxPresets = [
+            // Standard options
+            { width: 1024, height: 1024, label: '1024²', icon: 'square' },
+            { width: 1280, height: 768, label: 'HD Landscape', icon: 'image' },
+            { width: 768, height: 1280, label: 'HD Portrait', icon: 'phone' },
+            
+            // Higher resolution options
+            { width: 1536, height: 1024, label: '1.5K Wide', icon: 'aspect-ratio' },
+            { width: 1024, height: 1536, label: '1.5K Tall', icon: 'phone-landscape' },
+            { width: 1920, height: 1088, label: 'Full HD', icon: 'tv' },
+            { width: 2048, height: 1152, label: '2K Wide', icon: 'display' },
+            { width: 2048, height: 2048, label: '2K²', icon: 'square-fill' },
+        ];
+        
+        fluxPresets.forEach(preset => {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'btn btn-sm btn-outline-primary';
+            btn.onclick = () => setDimensions(preset.width, preset.height);
+            btn.innerHTML = `<i class="bi bi-${preset.icon}"></i> ${preset.label}`;
+            presetsContainer.appendChild(btn);
+        });
+        
+        // Add info about FLUX's capabilities
+        const info = document.createElement('div');
+        info.className = 'text-info small mt-2';
+        info.innerHTML = `<i class="bi bi-info-circle"></i> ${modelKey === 'flux-dev' ? 'FLUX Dev' : 'FLUX Schnell'} supports excellent quality up to 2K resolution`;
+        presetsContainer.appendChild(info);
+    } else {
+        // Enhanced presets for SDXL and other models
+        const presets = [
+            // Standard resolutions
+            { width: 512, height: 512, label: '512²', icon: 'square' },
+            { width: 768, height: 768, label: '768²', icon: 'square' },
+            { width: 1024, height: 768, label: 'Landscape', icon: 'image' },
+            { width: 768, height: 1024, label: 'Portrait', icon: 'phone' },
+            { width: 1024, height: 1024, label: '1K²', icon: 'square-fill' },
+            
+            // Higher resolutions for capable models
+            { width: 1280, height: 768, label: 'HD Landscape', icon: 'image' },
+            { width: 768, height: 1280, label: 'HD Portrait', icon: 'phone' },
+            { width: 1536, height: 1024, label: '1.5K Wide', icon: 'aspect-ratio' },
+            { width: 1920, height: 1088, label: 'Full HD', icon: 'tv' },
+            { width: 1344, height: 768, label: '16:9 Wide', icon: 'aspect-ratio-fill' },
+            { width: 896, height: 1152, label: '7:9 Portrait', icon: 'phone-landscape' },
+        ];
+        
+        presets.forEach(preset => {
+            if (preset.width >= modelInfo.min_width && preset.width <= modelInfo.max_width &&
+                preset.height >= modelInfo.min_height && preset.height <= modelInfo.max_height) {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'btn btn-sm btn-outline-primary';
+                btn.onclick = () => setDimensions(preset.width, preset.height);
+                btn.innerHTML = `<i class="bi bi-${preset.icon}"></i> ${preset.label}`;
+                presetsContainer.appendChild(btn);
+            }
+        });
+    }
 }
 
 function validateDimensions() {
@@ -206,6 +329,7 @@ function validateDimensions() {
     
     if (!selectedOption) return;
     
+    const modelKey = selectedOption.value;
     const width = parseInt(document.getElementById('width').value);
     const height = parseInt(document.getElementById('height').value);
     
@@ -216,8 +340,24 @@ function validateDimensions() {
     
     const warning = document.getElementById('dimensionWarning');
     
-    if (width < minWidth || width > maxWidth || height < minHeight || height > maxHeight) {
+    // Special validation for HunyuanDiT
+    if (modelKey === 'hunyuan') {
+        const supportedResolutions = [
+            '1024x1024', '1280x1280',
+            '1024x768', '1152x864', '1280x960', '1280x768',
+            '768x1024', '864x1152', '960x1280', '768x1280'
+        ];
+        const currentRes = `${width}x${height}`;
+        
+        if (!supportedResolutions.includes(currentRes)) {
+            warning.innerHTML = '<i class="bi bi-exclamation-triangle"></i> HunyuanDiT requires exact resolutions. Use presets above.';
+            warning.style.color = '#ff6b6b';
+        } else {
+            warning.textContent = '';
+        }
+    } else if (width < minWidth || width > maxWidth || height < minHeight || height > maxHeight) {
         warning.textContent = `(Model supports ${minWidth}-${maxWidth} × ${minHeight}-${maxHeight})`;
+        warning.style.color = '';
     } else {
         warning.textContent = '';
     }
@@ -244,6 +384,19 @@ async function handleGenerate(e) {
     if (seed && seed.trim() !== '') {
         data.seed = parseInt(seed);
     }
+    
+    // Add negative prompt if provided
+    const negativePrompt = formData.get('negativePrompt');
+    if (negativePrompt && negativePrompt.trim() !== '') {
+        data.negative_prompt = negativePrompt;
+    }
+    
+    // Add number of images
+    const numImages = formData.get('numImages');
+    if (numImages) {
+        data.num_images = parseInt(numImages);
+    }
+    
     
     // Validate dimensions
     if (data.width % 16 !== 0 || data.height % 16 !== 0) {
@@ -322,18 +475,46 @@ function updateProgressTime() {
 function displayResult(result, params) {
     currentImage = result;
     
+    // Check if we have multiple images
+    const hasMultipleImages = result.images && result.images.length > 1;
+    const images = result.images || [result.image]; // Handle both single and multiple image responses
+    
+    let imageHtml = '';
+    if (hasMultipleImages) {
+        // Grid layout for multiple images
+        imageHtml = '<div class="row g-2 mb-3">';
+        images.forEach((img, index) => {
+            imageHtml += `
+                <div class="col-6">
+                    <img src="data:image/png;base64,${img}" 
+                         alt="Generated image ${index + 1}" 
+                         class="result-image w-100"
+                         onclick="showImageModal(${index})"
+                         style="cursor: pointer;">
+                </div>
+            `;
+        });
+        imageHtml += '</div>';
+    } else {
+        // Single image layout
+        imageHtml = `
+            <img src="data:image/png;base64,${images[0]}" 
+                 alt="Generated image" 
+                 class="result-image mb-3"
+                 onclick="showImageModal()">
+        `;
+    }
+    
     const html = `
         <div class="card">
             <div class="card-body">
-                <img src="data:image/png;base64,${result.image}" 
-                     alt="Generated image" 
-                     class="result-image mb-3"
-                     onclick="showImageModal()">
+                ${imageHtml}
                 <div class="row">
                     <div class="col-md-6">
                         <p class="mb-1"><strong>Model:</strong> ${result.model_name}</p>
                         <p class="mb-1"><strong>Prompt:</strong> ${escapeHtml(params.prompt)}</p>
                         <p class="mb-1"><strong>Dimensions:</strong> ${params.width}×${params.height}</p>
+                        ${hasMultipleImages ? `<p class="mb-1"><strong>Images:</strong> ${images.length}</p>` : ''}
                     </div>
                     <div class="col-md-6">
                         <p class="mb-1"><strong>Steps:</strong> ${params.steps}</p>
@@ -343,9 +524,14 @@ function displayResult(result, params) {
                     </div>
                 </div>
                 <div class="mt-3">
-                    <button class="btn btn-primary btn-sm" onclick="downloadImage()">
-                        <i class="bi bi-download"></i> Download
-                    </button>
+                    ${hasMultipleImages ? 
+                        `<button class="btn btn-primary btn-sm" onclick="downloadAllImages()">
+                            <i class="bi bi-download"></i> Download All
+                        </button>` : 
+                        `<button class="btn btn-primary btn-sm" onclick="downloadImage()">
+                            <i class="bi bi-download"></i> Download
+                        </button>`
+                    }
                     <button class="btn btn-secondary btn-sm" onclick="copySettings()">
                         <i class="bi bi-clipboard"></i> Copy Settings
                     </button>
@@ -462,8 +648,36 @@ async function showStats() {
 function loadHistory() {
     const saved = localStorage.getItem('generationHistory');
     if (saved) {
-        generationHistory = JSON.parse(saved);
-        displayHistory();
+        try {
+            generationHistory = JSON.parse(saved);
+            
+            // Clean up old history items that might have full images
+            let needsCleanup = false;
+            generationHistory = generationHistory.map(item => {
+                if (item.fullResult && item.fullResult.image) {
+                    // Remove the image data to save space
+                    item.fullResult = {
+                        ...item.fullResult,
+                        image: undefined,
+                        images: undefined
+                    };
+                    needsCleanup = true;
+                }
+                return item;
+            });
+            
+            // Save cleaned up history
+            if (needsCleanup) {
+                console.log('Cleaned up old history items to save space');
+                saveHistory();
+            }
+            
+            displayHistory();
+        } catch (error) {
+            console.error('Failed to load history, clearing:', error);
+            generationHistory = [];
+            localStorage.removeItem('generationHistory');
+        }
     }
 }
 
@@ -472,12 +686,48 @@ function saveHistory() {
     if (generationHistory.length > 20) {
         generationHistory = generationHistory.slice(-20);
     }
-    localStorage.setItem('generationHistory', JSON.stringify(generationHistory));
+    
+    try {
+        localStorage.setItem('generationHistory', JSON.stringify(generationHistory));
+    } catch (error) {
+        if (error.name === 'QuotaExceededError') {
+            console.warn('localStorage quota exceeded, reducing history size');
+            // Reduce to 10 items and try again
+            generationHistory = generationHistory.slice(-10);
+            try {
+                localStorage.setItem('generationHistory', JSON.stringify(generationHistory));
+            } catch (secondError) {
+                console.error('Failed to save history even with reduced size:', secondError);
+                // Clear history as last resort
+                generationHistory = [];
+                localStorage.removeItem('generationHistory');
+            }
+        } else {
+            console.error('Failed to save history:', error);
+        }
+    }
 }
 
 async function addToHistory(result, params) {
+    // Get first image for thumbnail
+    const firstImage = result.image || (result.images && result.images[0]);
+    if (!firstImage) return;
+    
     // Create a thumbnail to save space in localStorage
-    const thumbnail = await createThumbnail(result.image, 128, 128);
+    let thumbnail;
+    try {
+        thumbnail = await createThumbnail(firstImage, 128, 128);
+    } catch (error) {
+        console.error('Thumbnail creation failed:', error);
+        return; // Don't save to history if thumbnail fails
+    }
+    
+    // Store metadata without the full image to save space
+    const resultWithoutImage = {
+        ...result,
+        image: undefined,  // Remove the large image data
+        images: undefined  // Remove any images array
+    };
     
     const historyItem = {
         id: Date.now(),
@@ -487,7 +737,9 @@ async function addToHistory(result, params) {
         gen_time: result.gen_time,
         model: result.model,
         model_name: result.model_name,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        // Store result metadata without the image data
+        fullResult: resultWithoutImage
     };
     
     generationHistory.push(historyItem);
@@ -502,28 +754,40 @@ async function createThumbnail(base64Image, maxWidth, maxHeight) {
         const img = new Image();
         
         img.onload = function() {
-            // Calculate thumbnail dimensions
-            let width = img.width;
-            let height = img.height;
-            
-            if (width > height) {
-                if (width > maxWidth) {
-                    height = Math.round(height * maxWidth / width);
-                    width = maxWidth;
+            try {
+                // Calculate thumbnail dimensions
+                let width = img.width;
+                let height = img.height;
+                
+                if (width > height) {
+                    if (width > maxWidth) {
+                        height = Math.round(height * maxWidth / width);
+                        width = maxWidth;
+                    }
+                } else {
+                    if (height > maxHeight) {
+                        width = Math.round(width * maxHeight / height);
+                        height = maxHeight;
+                    }
                 }
-            } else {
-                if (height > maxHeight) {
-                    width = Math.round(width * maxHeight / height);
-                    height = maxHeight;
-                }
+                
+                canvas.width = width;
+                canvas.height = height;
+                ctx.drawImage(img, 0, 0, width, height);
+                
+                // Return base64 thumbnail without data URL prefix
+                resolve(canvas.toDataURL('image/jpeg', 0.8).split(',')[1]);
+            } catch (error) {
+                console.error('Thumbnail creation error:', error);
+                // Return a placeholder if thumbnail fails
+                resolve('');
             }
-            
-            canvas.width = width;
-            canvas.height = height;
-            ctx.drawImage(img, 0, 0, width, height);
-            
-            // Return base64 thumbnail without data URL prefix
-            resolve(canvas.toDataURL('image/jpeg', 0.8).split(',')[1]);
+        };
+        
+        img.onerror = function() {
+            console.error('Failed to load image for thumbnail');
+            // Return empty string if loading fails
+            resolve('');
         };
         
         img.src = 'data:image/png;base64,' + base64Image;
@@ -538,15 +802,19 @@ function displayHistory() {
         return;
     }
     
-    const html = generationHistory.slice().reverse().map(item => `
-        <div class="history-item" onclick="loadFromHistory('${item.id}')" 
-             title="${escapeHtml(item.params.prompt)} (${item.model_name || item.model})">
-            <img src="data:image/jpeg;base64,${item.thumbnail}" alt="History image">
-            <div class="history-info">
-                ${item.params.width}×${item.params.height}
+    const html = generationHistory.slice().reverse().map(item => {
+        const hasMultiple = item.fullResult && item.fullResult.images && item.fullResult.images.length > 1;
+        return `
+            <div class="history-item" onclick="loadFromHistory('${item.id}')" 
+                 title="${escapeHtml(item.params.prompt)} (${item.model_name || item.model})">
+                <img src="data:image/jpeg;base64,${item.thumbnail}" alt="History image">
+                <div class="history-info">
+                    ${item.params.width}×${item.params.height}
+                    ${hasMultiple ? `<span class="badge bg-primary" style="font-size: 0.6rem; position: absolute; top: 2px; right: 2px;">${item.fullResult.images.length}</span>` : ''}
+                </div>
             </div>
-        </div>
-    `).join('');
+        `;
+    }).join('');
     
     container.innerHTML = html;
 }
@@ -571,11 +839,22 @@ function loadFromHistory(id) {
         document.getElementById('seed').value = item.seed;
     }
     
+    // Load negative prompt if it exists
+    if (item.params.negative_prompt) {
+        document.getElementById('negativePrompt').value = item.params.negative_prompt;
+    } else {
+        document.getElementById('negativePrompt').value = '';
+    }
+    
     // Update displays
     document.getElementById('stepsValue').textContent = item.params.steps;
     document.getElementById('guidanceValue').textContent = item.params.guidance;
     updateDimensionInfo();
     updateEstimatedTime();
+    
+    // Note: We no longer store full images in history to save space
+    // The thumbnail will remain visible, but we can't restore the full image
+    // Users will need to regenerate if they want the full image again
     
     showSuccess('Settings loaded from history');
 }
@@ -651,10 +930,18 @@ function randomSeed() {
     document.getElementById('seed').value = seed;
 }
 
-function showImageModal() {
+function showImageModal(index = 0) {
     if (!currentImage) return;
     
-    document.getElementById('modalImage').src = 'data:image/png;base64,' + currentImage.image;
+    const images = currentImage.images || [currentImage.image];
+    const imageData = images[index];
+    
+    document.getElementById('modalImage').src = 'data:image/png;base64,' + imageData;
+    
+    // Store current index for navigation
+    document.getElementById('modalImage').dataset.currentIndex = index;
+    document.getElementById('modalImage').dataset.totalImages = images.length;
+    
     const modal = new bootstrap.Modal(document.getElementById('imageModal'));
     modal.show();
 }
@@ -662,11 +949,30 @@ function showImageModal() {
 function downloadImage() {
     if (!currentImage) return;
     
+    const imageData = currentImage.image || (currentImage.images && currentImage.images[0]);
+    if (!imageData) return;
+    
     const link = document.createElement('a');
-    link.href = 'data:image/png;base64,' + currentImage.image;
+    link.href = 'data:image/png;base64,' + imageData;
     const modelName = currentImage.model || 'unknown';
     link.download = `generated_${modelName}_${Date.now()}.png`;
     link.click();
+}
+
+function downloadAllImages() {
+    if (!currentImage || !currentImage.images) return;
+    
+    const modelName = currentImage.model || 'unknown';
+    const timestamp = Date.now();
+    
+    currentImage.images.forEach((imageData, index) => {
+        setTimeout(() => {
+            const link = document.createElement('a');
+            link.href = 'data:image/png;base64,' + imageData;
+            link.download = `generated_${modelName}_${timestamp}_${index + 1}.png`;
+            link.click();
+        }, index * 100); // Small delay between downloads
+    });
 }
 
 function copySettings() {

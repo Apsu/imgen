@@ -20,6 +20,7 @@ from typing import Optional, Dict, Any, Tuple, List, Union
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 import threading
+from hunyuan_supported_resolutions import HUNYUAN_SUPPORTED_RESOLUTIONS, get_closest_hunyuan_resolution
 
 import torch
 import torch.multiprocessing as mp
@@ -46,6 +47,7 @@ from diffusers import (
 )
 from transformers import T5EncoderModel, T5Tokenizer
 from diffusers.utils import logging as diffusers_logging
+from compel import Compel, ReturnedEmbeddingsType
 
 # Disable tokenizers parallelism warning
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -67,6 +69,32 @@ diffusers_logging.disable_progress_bar()
 # Set up our logger
 logger = logging.getLogger(__name__)
 
+# Helper functions for compel support
+def model_uses_clip(model_key: str) -> bool:
+    """Check if a model uses CLIP text encoder(s) for compel processing."""
+    clip_models = {
+        # SDXL variants (dual CLIP)
+        "sdxl", "juggernaut", "realvisxl", "dreamshaper", "anime",
+        # Stable Cascade (single CLIP)
+        "stable-cascade",
+        # Playground (dual CLIP)
+        "playground",
+        # HunyuanDiT (bilingual CLIP + mT5)
+        "hunyuan"
+        # Note: FLUX models use T5 which can handle longer prompts natively (512 tokens vs 77)
+        # so compel is not needed for FLUX
+    }
+    return model_key in clip_models
+
+def model_uses_dual_clip(model_key: str) -> bool:
+    """Check if a model uses dual CLIP encoders (SDXL-style)."""
+    dual_clip_models = {
+        # SDXL variants
+        "sdxl", "juggernaut", "realvisxl", "dreamshaper", "anime", "playground"
+        # Note: FLUX models removed - they use T5 which handles long prompts natively
+    }
+    return model_key in dual_clip_models
+
 # Model configurations
 @dataclass
 class ModelConfig:
@@ -81,10 +109,25 @@ class ModelConfig:
     max_height: int
     vram_gb: float  # Estimated VRAM usage
     description: str
+    supports_guidance: bool = True  # Whether model supports guidance scale
+    supports_negative_prompt: bool = True  # Whether model supports negative prompts
+    recommended_resolutions: Optional[List[Tuple[int, int]]] = None
+    resolution_constraints: Optional[str] = None
     
     def supports_dimensions(self, width: int, height: int) -> bool:
         return (self.min_width <= width <= self.max_width and 
                 self.min_height <= height <= self.max_height)
+    
+    def get_resolution_info(self) -> Dict[str, Any]:
+        """Get resolution information including recommendations."""
+        return {
+            "min_width": self.min_width,
+            "max_width": self.max_width,
+            "min_height": self.min_height,
+            "max_height": self.max_height,
+            "recommended": getattr(self, "recommended_resolutions", None),
+            "constraints": getattr(self, "resolution_constraints", None)
+        }
 
 
 # Available models - configure based on your preferences
@@ -100,7 +143,9 @@ AVAILABLE_MODELS = {
         min_height=256,
         max_height=2048,
         vram_gb=12.0,
-        description="Fast high-quality generation, no CFG needed"
+        description="Fast high-quality generation, no CFG needed",
+        supports_guidance=False,  # Schnell doesn't use guidance
+        supports_negative_prompt=False  # FLUX models don't support negative prompts
     ),
     "flux-dev": ModelConfig(
         name="FLUX.1 Dev",
@@ -113,7 +158,8 @@ AVAILABLE_MODELS = {
         min_height=256,
         max_height=2048,
         vram_gb=24.0,
-        description="Higher quality, supports guidance"
+        description="Higher quality, supports guidance",
+        supports_negative_prompt=False  # FLUX models don't support negative prompts
     ),
     "sdxl": ModelConfig(
         name="Stable Diffusion XL",
@@ -191,7 +237,9 @@ AVAILABLE_MODELS = {
         min_height=512,
         max_height=2048,
         vram_gb=10.0,
-        description="High-quality anime-style generation v4"
+        description="High-quality anime-style generation v4 (use tag-based prompts)",
+        recommended_resolutions=[(1024, 1024), (832, 1216), (1216, 832)],
+        resolution_constraints="Best with tag-based prompts (e.g. '1girl, solo, long hair'). Add quality tags: 'masterpiece, absurdres'"
     ),
     # --- Cutting-Edge Diffusion Transformer Models ---
     "sana": ModelConfig(
@@ -205,7 +253,8 @@ AVAILABLE_MODELS = {
         min_height=512,
         max_height=1024,
         vram_gb=12.0,
-        description="High-quality 1K generation with Linear DiT"
+        description="High-quality 1K generation with Linear DiT (best with complex prompts)",
+        resolution_constraints="Works best with complex, detailed prompts. Simple prompts may produce artifacts."
     ),
     "hunyuan": ModelConfig(
         name="HunyuanDiT Bilingual",
@@ -213,12 +262,14 @@ AVAILABLE_MODELS = {
         pipeline_class=HunyuanDiTPipeline,
         default_steps=50,
         default_guidance=5.0,  # Updated to match documentation
-        min_width=512,
-        max_width=2048,
-        min_height=512,
-        max_height=2048,
+        min_width=768,  # Constrain to supported sizes
+        max_width=1280,
+        min_height=768,
+        max_height=1280,
         vram_gb=12.0,
-        description="Bilingual (EN/CN) understanding with cultural context"
+        description="Bilingual (EN/CN) understanding with cultural context",
+        recommended_resolutions=HUNYUAN_SUPPORTED_RESOLUTIONS,
+        resolution_constraints="Only supports specific resolutions. Others will be adjusted automatically."
     ),
     "pixart": ModelConfig(
         name="PixArt-Sigma XL",
@@ -227,11 +278,16 @@ AVAILABLE_MODELS = {
         default_steps=20,
         default_guidance=4.5,
         min_width=512,
-        max_width=2048,
+        max_width=4096,
         min_height=512,
-        max_height=2048,
+        max_height=4096,
         vram_gb=8.0,
-        description="Ultra-efficient 0.6B param model, exceptional prompt adherence"
+        description="Ultra-efficient 0.6B param model, exceptional prompt adherence, supports up to 4K",
+        recommended_resolutions=[
+            (1024, 1024), (2048, 2048), (4096, 4096),  # Square
+            (1920, 1080), (3840, 2160),  # 16:9
+            (1080, 1920), (2160, 3840),  # 9:16
+        ]
     ),
     "sana-sprint": ModelConfig(
         name="Sana Sprint 1.6B",
@@ -270,20 +326,25 @@ AVAILABLE_MODELS = {
         min_height=1024,
         max_height=1536,
         vram_gb=20.0,  # Prior + Decoder
-        description="Würstchen v3: Revolutionary two-stage 24x24 latent architecture"
+        description="Würstchen v3: Revolutionary two-stage 24x24 latent architecture",
+        resolution_constraints="Minimum 1024x1024 required. Two-stage generation (prior + decoder)."
     ),
     "lumina-next": ModelConfig(
         name="Lumina-Next 2B",
         model_id="Alpha-VLLM/Lumina-Next-SFT-diffusers",
         pipeline_class=LuminaPipeline,
-        default_steps=30,
-        default_guidance=3.5,
+        default_steps=60,  # Recommended sampling steps
+        default_guidance=4.0,  # Recommended cfg_scale
         min_width=512,
         max_width=2048,
         min_height=512,
         max_height=2048,
         vram_gb=12.0,
-        description="2B DiT model with Gemma-2B text encoder, high quality"
+        description="2B DiT model with Gemma-2B text encoder, supports 2K resolution",
+        recommended_resolutions=[
+            (1024, 1024), (512, 2048), (2048, 512),  # Standard resolutions
+            (1664, 1664), (1024, 2048), (2048, 1024),  # Extrapolation resolutions
+        ]
     ),
     "chroma": ModelConfig(
         name="Chroma 8.9B",
@@ -299,6 +360,53 @@ AVAILABLE_MODELS = {
         description="Uncensored FLUX variant, 8.9B params, Apache 2.0"
     ),
 }
+
+
+def validate_and_adjust_resolution(model_key: str, width: int, height: int) -> Tuple[int, int, Optional[str]]:
+    """
+    Validate and potentially adjust resolution for a model.
+    Returns: (adjusted_width, adjusted_height, warning_message)
+    """
+    model_config = AVAILABLE_MODELS[model_key]
+    warning = None
+    
+    # Special handling for HunyuanDiT
+    if model_key == "hunyuan":
+        # Check if resolution is supported
+        if (width, height) not in HUNYUAN_SUPPORTED_RESOLUTIONS:
+            new_width, new_height = get_closest_hunyuan_resolution(width, height)
+            warning = (f"HunyuanDiT doesn't support {width}x{height}. "
+                      f"Adjusted to closest supported resolution: {new_width}x{new_height}")
+            width, height = new_width, new_height
+    
+    # Ensure dimensions are within model bounds
+    width = max(model_config.min_width, min(width, model_config.max_width))
+    height = max(model_config.min_height, min(height, model_config.max_height))
+    
+    # Ensure divisible by 16
+    width = (width // 16) * 16
+    height = (height // 16) * 16
+    
+    return width, height, warning
+
+
+def get_model_resolution_info(model_key: str) -> Dict[str, Any]:
+    """Get detailed resolution information for a model."""
+    config = AVAILABLE_MODELS[model_key]
+    info = config.get_resolution_info()
+    
+    # Add model-specific information
+    if model_key == "hunyuan":
+        info["supported_resolutions"] = HUNYUAN_SUPPORTED_RESOLUTIONS
+        info["auto_adjust"] = True
+    elif model_key == "anime":
+        info["prompt_format"] = "tag-based"
+        info["quality_tags"] = ["masterpiece", "absurdres", "high score", "great score"]
+    elif model_key == "sana":
+        info["prompt_recommendation"] = "Use complex, detailed prompts for best results"
+    
+    return info
+
 
 # Global configuration and state variables
 server_config: Optional[argparse.Namespace]
@@ -325,13 +433,15 @@ stats_lock = threading.Lock()
 
 # Request model definition with model selection
 class TextToImageInput(BaseModel):
-    prompt: str = Field(..., min_length=1, max_length=1000)
+    prompt: str = Field(..., min_length=1, max_length=2000, description="Text prompt. Supports prompt weighting syntax like (beautiful:1.2) for CLIP-based models")
     model: str = Field("flux-schnell", description="Model to use for generation")
     width: int = Field(1024, ge=256, le=4096)
     height: int = Field(768, ge=256, le=4096)
     steps: Optional[int] = Field(None, ge=1, le=100)
     guidance: Optional[float] = Field(None, ge=0.0, le=20.0)
     seed: Optional[int] = Field(None, ge=-2147483648, le=2147483647)
+    negative_prompt: Optional[str] = Field(None, max_length=2000, description="Negative prompt for models that support it. Supports prompt weighting syntax")
+    num_images: Optional[int] = Field(1, ge=1, le=4, description="Number of images to generate")
     
     @field_validator('width', 'height')
     def dimensions_divisible_by_16(cls, v):
@@ -597,8 +707,53 @@ def worker_process(worker_id: int, model_key: str, gpu_id: int, pipe: mp.Pipe, r
             _ = pipeline(**warmup_args, output_type="pil")
         logger.info(f"Worker {worker_id} warmup complete")
         
+        # Create compel processor for CLIP-based models
+        compel_proc = None
+        if model_uses_clip(model_key):
+            try:
+                if model_key in ["flux-schnell", "flux-dev", "chroma"]:
+                    # FLUX-style models (CLIP + T5) - only use CLIP for compel
+                    logger.info(f"Worker {worker_id} creating FLUX compel processor (CLIP only)")
+                    # Start with basic compel and handle pooled embeddings manually
+                    compel_proc = Compel(
+                        tokenizer=pipeline.tokenizer,
+                        text_encoder=pipeline.text_encoder,
+                        truncate_long_prompts=False
+                    )
+                elif model_uses_dual_clip(model_key):
+                    # SDXL-style dual CLIP encoders - use standard SDXL approach  
+                    logger.info(f"Worker {worker_id} creating SDXL compel processor")
+                    compel_proc = Compel(
+                        tokenizer=[pipeline.tokenizer, pipeline.tokenizer_2],
+                        text_encoder=[pipeline.text_encoder, pipeline.text_encoder_2],
+                        returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED,
+                        requires_pooled=[False, True],
+                        truncate_long_prompts=False
+                    )
+                elif model_key == "stable-cascade":
+                    # Stable Cascade has special pipeline structure
+                    prior, decoder = pipeline
+                    logger.info(f"Worker {worker_id} creating Stable Cascade compel processor")
+                    compel_proc = Compel(
+                        tokenizer=prior.tokenizer,
+                        text_encoder=prior.text_encoder,
+                        truncate_long_prompts=False
+                    )
+                else:
+                    # Single CLIP encoder (FLUX, Chroma)
+                    logger.info(f"Worker {worker_id} creating single CLIP compel processor")
+                    compel_proc = Compel(
+                        tokenizer=pipeline.tokenizer,
+                        text_encoder=pipeline.text_encoder,
+                        truncate_long_prompts=False
+                    )
+                logger.info(f"Worker {worker_id} compel processor created successfully")
+            except Exception as e:
+                logger.warning(f"Worker {worker_id} failed to create compel processor: {e}")
+                compel_proc = None
+        
         # Store pipeline info in global
-        worker_pipeline = (pipeline, generator, device, gpu_id, model_key)
+        worker_pipeline = (pipeline, generator, device, gpu_id, model_key, compel_proc)
         
         # Signal ready
         ready_queue.put((worker_id, model_key, gpu_id))
@@ -606,30 +761,194 @@ def worker_process(worker_id: int, model_key: str, gpu_id: int, pipe: mp.Pipe, r
         # Main worker loop
         while True:
             try:
-                # Wait for request from pipe
-                request = pipe.recv()
+                # Wait for request from pipe with timeout to allow checking shutdown
+                if pipe.poll(timeout=1.0):
+                    request = pipe.recv()
+                    
+                    if request is None:  # Shutdown signal
+                        break
+                else:
+                    # No request, check if we should shutdown
+                    if shutdown_event.is_set():
+                        break
+                    continue
                 
-                if request is None:  # Shutdown signal
-                    break
+                gen_args, seed, request_id, num_images = request
                 
-                gen_args, seed, request_id = request
+                # Extract compel processor from worker_pipeline
+                if worker_pipeline and len(worker_pipeline) >= 6:
+                    _, _, _, _, _, compel_proc = worker_pipeline
+                else:
+                    # Fallback for older format
+                    compel_proc = None
                 
-                # Generate image
+                # Log generation info before compel processing
+                prompt_text = gen_args.get('prompt', 'no prompt')
+                compel_available = compel_proc is not None
                 logger.info(
                     f"Worker {worker_id} (GPU {gpu_id}, {model_key}) processing: "
-                    f"prompt='{gen_args['prompt'][:50]}...' "
+                    f"prompt='{str(prompt_text)[:50]}...' "
                     f"size={gen_args['width']}x{gen_args['height']} "
-                    f"steps={gen_args['num_inference_steps']} guidance={gen_args['guidance_scale']} seed={seed}"
+                    f"steps={gen_args['num_inference_steps']} guidance={gen_args['guidance_scale']} "
+                    f"num_images={num_images} seed={seed} compel_available={compel_available}"
                 )
                 
                 if seed is not None:
                     generator.manual_seed(seed)
                 else:
-                    random_seed = random.randint(0, 2**32 - 1)
+                    random_seed = random.randint(0, 2147483647)
                     generator.manual_seed(random_seed)
                     seed = random_seed
                 
                 start_time = time.time()
+                
+                # Check shutdown before expensive operations
+                if shutdown_event.is_set():
+                    logger.info(f"Worker {worker_id} received shutdown signal, breaking")
+                    break
+                
+                # Process prompts with compel if available
+                if compel_proc is not None:
+                    logger.info(f"Worker {worker_id} using compel to process prompts")
+                    try:
+                        # Extract text prompts
+                        prompt = gen_args.get('prompt', '')
+                        negative_prompt = gen_args.get('negative_prompt', '')
+                        
+                        # Store original prompts for models that need them (like Stable Cascade decoder)
+                        if prompt:
+                            gen_args['original_prompt'] = prompt
+                        if negative_prompt:
+                            gen_args['original_negative_prompt'] = negative_prompt
+                        
+                        # Process both prompts with compel to ensure consistent shapes
+                        if prompt:
+                            # Process positive prompt
+                            logger.debug(f"Worker {worker_id} processing positive prompt length: {len(prompt)} chars")
+                            embeddings_result = compel_proc(prompt)
+                            logger.debug(f"Worker {worker_id} positive embeddings result type: {type(embeddings_result)}")
+                            
+                            # Initialize variables to track embeddings for shape comparison
+                            positive_embeds = None
+                            positive_pooled = None
+                            
+                            if model_key in ["flux-schnell", "flux-dev", "chroma"]:
+                                # FLUX-style models - compel returns regular embeddings, need to create pooled
+                                positive_embeds = embeddings_result
+                                positive_pooled = embeddings_result
+                                gen_args['prompt_embeds'] = positive_embeds
+                                gen_args['pooled_prompt_embeds'] = positive_pooled
+                            elif model_uses_dual_clip(model_key):
+                                # SDXL-style models should return tuple when properly configured
+                                if isinstance(embeddings_result, (tuple, list)) and len(embeddings_result) == 2:
+                                    # Tuple format: (prompt_embeds, pooled_prompt_embeds)
+                                    positive_embeds, positive_pooled = embeddings_result
+                                    gen_args['prompt_embeds'] = positive_embeds
+                                    gen_args['pooled_prompt_embeds'] = positive_pooled
+                                    logger.debug(f"Worker {worker_id} SDXL model returned tuple with shapes: embeds {positive_embeds.shape}, pooled {positive_pooled.shape}")
+                                else:
+                                    # Single tensor - this shouldn't happen with proper config
+                                    logger.warning(f"Worker {worker_id} SDXL model returned single tensor instead of tuple")
+                                    positive_embeds = embeddings_result
+                                    gen_args['prompt_embeds'] = positive_embeds
+                            else:
+                                # Single encoder models
+                                positive_embeds = embeddings_result
+                                gen_args['prompt_embeds'] = positive_embeds
+                            
+                            # Remove text prompt since we're using embeddings
+                            gen_args.pop('prompt', None)
+                            
+                            # Process negative prompt (or create empty one with same processing)
+                            # Important: If no negative prompt provided, we need to create embeddings
+                            # that match the shape of the positive prompt embeddings
+                            if negative_prompt and negative_prompt.strip():
+                                negative_text = negative_prompt
+                            else:
+                                # Create empty negative prompt that will produce same-shaped embeddings
+                                # For compel, we can use empty string but ensure it gets same processing
+                                negative_text = ""
+                            
+                            logger.debug(f"Worker {worker_id} processing negative prompt: '{negative_text}' (empty={not bool(negative_text)})")
+                            neg_embeddings_result = compel_proc(negative_text)
+                            logger.debug(f"Worker {worker_id} negative embeddings result type: {type(neg_embeddings_result)}")
+                            
+                            # Initialize variables for negative embeddings
+                            negative_embeds = None
+                            negative_pooled = None
+                            
+                            if model_key in ["flux-schnell", "flux-dev", "chroma"]:
+                                # FLUX-style models - compel returns regular embeddings, need to create pooled
+                                negative_embeds = neg_embeddings_result
+                                negative_pooled = neg_embeddings_result
+                            elif model_uses_dual_clip(model_key):
+                                # SDXL-style models should return tuple when properly configured
+                                if isinstance(neg_embeddings_result, (tuple, list)) and len(neg_embeddings_result) == 2:
+                                    # Tuple format: (negative_prompt_embeds, negative_pooled_prompt_embeds)
+                                    negative_embeds, negative_pooled = neg_embeddings_result
+                                    logger.debug(f"Worker {worker_id} SDXL negative returned tuple with shapes: embeds {negative_embeds.shape}, pooled {negative_pooled.shape}")
+                                else:
+                                    # Single tensor - this shouldn't happen with proper config
+                                    logger.warning(f"Worker {worker_id} SDXL negative returned single tensor instead of tuple")
+                                    negative_embeds = neg_embeddings_result
+                            else:
+                                # Single encoder models
+                                negative_embeds = neg_embeddings_result
+                            
+                            # Now check if shapes match and fix if needed
+                            if positive_embeds is not None and negative_embeds is not None:
+                                if hasattr(positive_embeds, 'shape') and hasattr(negative_embeds, 'shape'):
+                                    if positive_embeds.shape != negative_embeds.shape:
+                                        logger.warning(f"Worker {worker_id} shape mismatch detected: positive {positive_embeds.shape} vs negative {negative_embeds.shape}")
+                                        # Expand negative embeddings to match positive embeddings shape
+                                        target_seq_len = positive_embeds.shape[1]
+                                        current_seq_len = negative_embeds.shape[1]
+                                        if target_seq_len > current_seq_len:
+                                            # Repeat the last token embedding to pad to target length
+                                            padding_needed = target_seq_len - current_seq_len
+                                            last_token = negative_embeds[:, -1:, :]  # Shape: [1, 1, hidden_dim]
+                                            padding = last_token.repeat(1, padding_needed, 1)  # Shape: [1, padding_needed, hidden_dim]
+                                            negative_embeds = torch.cat([negative_embeds, padding], dim=1)
+                                            logger.info(f"Worker {worker_id} padded negative embeddings from {current_seq_len} to {target_seq_len} tokens")
+                                        elif target_seq_len < current_seq_len:
+                                            # Truncate to match
+                                            negative_embeds = negative_embeds[:, :target_seq_len, :]
+                                            logger.info(f"Worker {worker_id} truncated negative embeddings from {current_seq_len} to {target_seq_len} tokens")
+                            
+                            # Now set the embeddings in gen_args
+                            if model_key in ["flux-schnell", "flux-dev", "chroma"]:
+                                gen_args['negative_prompt_embeds'] = negative_embeds
+                                gen_args['negative_pooled_prompt_embeds'] = negative_pooled
+                            elif model_uses_dual_clip(model_key):
+                                gen_args['negative_prompt_embeds'] = negative_embeds
+                                if negative_pooled is not None:
+                                    gen_args['negative_pooled_prompt_embeds'] = negative_pooled
+                            else:
+                                gen_args['negative_prompt_embeds'] = negative_embeds
+                            
+                            # Remove text negative prompt since we're using embeddings
+                            gen_args.pop('negative_prompt', None)
+                            
+                        logger.info(f"Worker {worker_id} compel processing complete - using embeddings")
+                        
+                        # Log final gen_args keys for debugging
+                        embed_keys = [k for k in gen_args.keys() if 'embed' in k]
+                        logger.info(f"Worker {worker_id} embedding keys: {embed_keys}")
+                    except Exception as e:
+                        logger.warning(f"Worker {worker_id} compel processing failed, falling back to text: {e}")
+                        # Keep original text prompts on failure
+                
+                # Add num_images_per_prompt to gen_args (diffusers parameter name)
+                gen_args['num_images_per_prompt'] = num_images
+                
+                # Final shutdown check before generation
+                if shutdown_event.is_set():
+                    logger.info(f"Worker {worker_id} received shutdown signal before generation, breaking")
+                    break
+                
+                # Remove original prompts from gen_args before pipeline call (only keep for special cases)
+                original_prompt = gen_args.pop('original_prompt', None)
+                original_negative_prompt = gen_args.pop('original_negative_prompt', None)
                 
                 # Generate image
                 with torch.amp.autocast('cuda', dtype=torch.bfloat16):
@@ -637,14 +956,28 @@ def worker_process(worker_id: int, model_key: str, gpu_id: int, pipe: mp.Pipe, r
                         # Special handling for Stable Cascade two-stage model
                         prior, decoder = pipeline
                         prior_output = prior(**gen_args, generator=generator, output_type="pt")
-                        output = decoder(
-                            image_embeddings=prior_output.image_embeddings,
-                            prompt=gen_args["prompt"],
-                            num_inference_steps=10,  # Decoder uses fewer steps
-                            guidance_scale=0.0,  # Decoder doesn't use guidance
-                            generator=generator,
-                            output_type="pil"
-                        )
+                        
+                        # Handle text prompt vs embeddings for decoder
+                        decoder_args = {
+                            "image_embeddings": prior_output.image_embeddings,
+                            "num_inference_steps": 10,  # Decoder uses fewer steps
+                            "guidance_scale": 0.0,  # Decoder doesn't use guidance
+                            "generator": generator,
+                            "output_type": "pil"
+                        }
+                        
+                        # Add prompt (text or embeddings) to decoder
+                        if 'prompt_embeds' in gen_args:
+                            # Use embeddings if available - but decoder might not support this
+                            # Fall back to original prompt if we stored it
+                            if original_prompt:
+                                decoder_args["prompt"] = original_prompt
+                            else:
+                                decoder_args["prompt"] = "beautiful image"  # Fallback
+                        else:
+                            decoder_args["prompt"] = gen_args.get("prompt", "beautiful image")
+                        
+                        output = decoder(**decoder_args)
                     elif model_key in ['sana-sprint', 'sana-sprint-small']:
                         # Always pass intermediate_timesteps=None for Sana Sprint
                         gen_args['intermediate_timesteps'] = None
@@ -654,21 +987,23 @@ def worker_process(worker_id: int, model_key: str, gpu_id: int, pipe: mp.Pipe, r
                 
                 elapsed = time.time() - start_time
                 
-                # Convert to base64
-                buffered = io.BytesIO()
-                image = output.images[0]
-                image.save(buffered, format="PNG")
-                img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+                # Convert all images to base64
+                image_strings = []
+                for image in output.images:
+                    buffered = io.BytesIO()
+                    image.save(buffered, format="PNG")
+                    img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+                    image_strings.append(img_str)
                 
-                logger.info(f"Worker {worker_id} completed in {elapsed:.2f}s")
+                logger.info(f"Worker {worker_id} completed {len(image_strings)} images in {elapsed:.2f}s")
                 
                 # Send result back
-                pipe.send((img_str, elapsed, seed))
+                pipe.send((image_strings, elapsed, seed))
                 
             except Exception as e:
                 logger.error(f"Worker {worker_id} error: {e}")
                 logger.error(traceback.format_exc())
-                pipe.send((None, 0, None))
+                pipe.send(([None], 0, None))  # Return list to match expected format
         
     except Exception as e:
         logger.error(f"Worker {worker_id} failed to initialize: {str(e)}")
@@ -800,7 +1135,7 @@ class MultiModelGenerator:
                 if task is None:  # Shutdown signal
                     break
                 
-                gen_args, seed, request_id, future = task
+                gen_args, seed, request_id, num_images, future = task
                 
                 # Get available worker for this model
                 workers = self.model_to_workers[model_key]
@@ -816,7 +1151,7 @@ class MultiModelGenerator:
                     parent_conn, _ = self.worker_pipes[worker_id]
                     
                     # Send request to worker
-                    parent_conn.send((gen_args, seed, request_id))
+                    parent_conn.send((gen_args, seed, request_id, num_images))
                     
                     # Wait for response asynchronously
                     result = await asyncio.get_event_loop().run_in_executor(
@@ -833,7 +1168,7 @@ class MultiModelGenerator:
             except Exception as e:
                 logger.error(f"Task processor error: {e}")
 
-    async def generate(self, model_key: str, gen_args: Dict[str, Any], seed: int | None, request_id: str) -> Tuple[str, float, int]:
+    async def generate(self, model_key: str, gen_args: Dict[str, Any], seed: int | None, request_id: str, num_images: int = 1) -> Tuple[List[str], float, int]:
         """Submit a generation job for a specific model."""
         if self.shutdown_requested:
             raise RuntimeError("Generator is shutting down")
@@ -848,7 +1183,7 @@ class MultiModelGenerator:
         future = asyncio.Future()
         
         # Add to appropriate queue
-        await self.model_queues[model_key].put((gen_args, seed, request_id, future))
+        await self.model_queues[model_key].put((gen_args, seed, request_id, num_images, future))
         
         # Wait for result
         return await future
@@ -890,11 +1225,16 @@ class MultiModelGenerator:
             except:
                 pass
         
-        # Wait for processes to exit
+        # Wait for processes to exit with shorter timeout
         for p in self.worker_processes:
-            p.join(timeout=5)
+            p.join(timeout=2)  # Reduced from 5 to 2 seconds
             if p.is_alive():
+                logger.warning(f"Worker process {p.pid} did not exit gracefully, terminating")
                 p.terminate()
+                p.join(timeout=1)  # Give 1 second after terminate
+                if p.is_alive():
+                    logger.error(f"Worker process {p.pid} still alive after terminate, killing")
+                    p.kill()
         
         # Close pipes
         for parent_conn, child_conn in self.worker_pipes.values():
@@ -1056,6 +1396,7 @@ async def index(request: Request):
     # Prepare model info for frontend
     models_info = {}
     for key, config in AVAILABLE_MODELS.items():
+        resolution_info = get_model_resolution_info(key)
         models_info[key] = {
             "name": config.name,
             "description": config.description,
@@ -1065,6 +1406,11 @@ async def index(request: Request):
             "max_width": config.max_width,
             "min_height": config.min_height,
             "max_height": config.max_height,
+            "supports_guidance": config.supports_guidance,
+            "supports_negative_prompt": config.supports_negative_prompt,
+            "resolution_info": resolution_info,
+            "resolution_constraints": config.resolution_constraints,
+            "recommended_resolutions": config.recommended_resolutions,
         }
     
     return templates.TemplateResponse("index_multimodel.html", {
@@ -1085,6 +1431,7 @@ async def get_models():
     response = {}
     for key, config in AVAILABLE_MODELS.items():
         status = model_status.get(key, {"loaded": False, "worker_count": 0, "queue_size": 0})
+        resolution_info = get_model_resolution_info(key)
         response[key] = {
             "name": config.name,
             "description": config.description,
@@ -1097,9 +1444,31 @@ async def get_models():
             "loaded": status["loaded"],
             "worker_count": status["worker_count"],
             "queue_size": status["queue_size"],
+            "supports_guidance": config.supports_guidance,
+            "supports_negative_prompt": config.supports_negative_prompt,
+            "resolution_info": resolution_info,
         }
     
     return JSONResponse(response)
+
+
+@app.get("/api/models/{model_key}/resolution-info")
+async def get_model_resolution_details(model_key: str):
+    """Get detailed resolution information for a specific model."""
+    if model_key not in AVAILABLE_MODELS:
+        raise HTTPException(status_code=404, detail=f"Model {model_key} not found")
+    
+    resolution_info = get_model_resolution_info(model_key)
+    config = AVAILABLE_MODELS[model_key]
+    
+    return JSONResponse({
+        "model": model_key,
+        "name": config.name,
+        "resolution_info": resolution_info,
+        "description": config.description,
+        "resolution_constraints": config.resolution_constraints,
+        "recommended_resolutions": config.recommended_resolutions,
+    })
 
 
 @app.get("/api/stats")
@@ -1155,14 +1524,14 @@ async def generate_image(request: Request, image_input: TextToImageInput):
         # Get model config
         model_config = AVAILABLE_MODELS[image_input.model]
         
-        # Validate dimensions for this model
-        if not model_config.supports_dimensions(image_input.width, image_input.height):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Model {model_config.name} doesn't support {image_input.width}x{image_input.height}. "
-                       f"Supported range: {model_config.min_width}-{model_config.max_width} x "
-                       f"{model_config.min_height}-{model_config.max_height}"
-            )
+        # Validate and adjust resolution
+        adjusted_width, adjusted_height, resolution_warning = validate_and_adjust_resolution(
+            image_input.model, image_input.width, image_input.height
+        )
+        
+        # Log if resolution was adjusted
+        if resolution_warning:
+            logger.info(resolution_warning)
         
         # Use model defaults if not specified
         steps = image_input.steps if image_input.steps is not None else model_config.default_steps
@@ -1178,18 +1547,30 @@ async def generate_image(request: Request, image_input: TextToImageInput):
             "model": image_input.model,
         })
         
-        # Prepare arguments
+        # Prepare arguments with adjusted dimensions
         gen_args = {
             "prompt": image_input.prompt,
-            "width": image_input.width,
-            "height": image_input.height,
+            "width": adjusted_width,
+            "height": adjusted_height,
             "num_inference_steps": steps,
             "guidance_scale": guidance,
         }
+        
+        # Add negative prompt if provided and model supports it
+        if image_input.negative_prompt:
+            gen_args["negative_prompt"] = image_input.negative_prompt
+        
+        # Add HunyuanDiT-specific parameters
+        if image_input.model == "hunyuan":
+            # Disable resolution binning to prevent aspect ratio changes
+            gen_args["use_resolution_binning"] = False
+            gen_args["original_size"] = (adjusted_width, adjusted_height)
+            gen_args["target_size"] = (adjusted_width, adjusted_height)
 
-        # Generate image
-        img_str, gen_time, used_seed = await shared_generator.generate(
-            image_input.model, gen_args, image_input.seed, request_id
+        # Generate images
+        num_images = image_input.num_images if image_input.num_images else 1
+        image_strings, gen_time, used_seed = await shared_generator.generate(
+            image_input.model, gen_args, image_input.seed, request_id, num_images
         )
         
         # Update statistics
@@ -1202,7 +1583,7 @@ async def generate_image(request: Request, image_input: TextToImageInput):
                 (model_stats["average_time"] * (total - 1) + gen_time) / total
             )
             
-            dim_key = f"{image_input.width}x{image_input.height}"
+            dim_key = f"{adjusted_width}x{adjusted_height}"
             if dim_key not in model_stats["dimension_counts"]:
                 model_stats["dimension_counts"][dim_key] = 0
             model_stats["dimension_counts"][dim_key] += 1
@@ -1215,15 +1596,37 @@ async def generate_image(request: Request, image_input: TextToImageInput):
             "gen_time": gen_time,
         })
 
-        return JSONResponse({
-            "image": img_str,
-            "gen_time": gen_time,
-            "seed": used_seed,
-            "width": image_input.width,
-            "height": image_input.height,
-            "model": image_input.model,
-            "model_name": model_config.name,
-        })
+        # Build response - maintain backward compatibility for single image
+        if num_images == 1:
+            response_data = {
+                "image": image_strings[0],
+                "gen_time": gen_time,
+                "seed": used_seed,
+                "width": adjusted_width,
+                "height": adjusted_height,
+                "model": image_input.model,
+                "model_name": model_config.name,
+            }
+        else:
+            # Multiple images response
+            response_data = {
+                "images": image_strings,
+                "gen_time": gen_time,
+                "seed": used_seed,
+                "width": adjusted_width,
+                "height": adjusted_height,
+                "model": image_input.model,
+                "model_name": model_config.name,
+                "num_images": num_images,
+            }
+        
+        # Add resolution warning if applicable
+        if resolution_warning:
+            response_data["resolution_warning"] = resolution_warning
+            response_data["requested_width"] = image_input.width
+            response_data["requested_height"] = image_input.height
+        
+        return JSONResponse(response_data)
         
     except Exception as e:
         logger.error(f"Error generating image: {str(e)}")

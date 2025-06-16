@@ -11,3 +11,4 @@ torch
 transformers
 uvicorn
 websockets
+compel>=2.0.0
