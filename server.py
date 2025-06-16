@@ -1413,7 +1413,7 @@ async def index(request: Request):
             "recommended_resolutions": config.recommended_resolutions,
         }
     
-    return templates.TemplateResponse("index_multimodel.html", {
+    return templates.TemplateResponse("index.html", {
         "request": request,
         "models": models_info,
         "loaded_models": list(server_config.model_distribution.keys()) if server_config else [],
