@@ -1,10 +1,14 @@
 accelerate
 aiohttp
-diffusers
+git+https://github.com/huggingface/diffusers.git@main
 fastapi
+jinja2
 protobuf
 pydantic
+python-multipart
 sentencepiece
 torch
 transformers
 uvicorn
+websockets
+compel>=2.0.0
